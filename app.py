@@ -159,22 +159,36 @@ def metrics():
 @app.route("/markets")
 def get_markets():
     try:
-    r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=10", timeout=3)
-    data = r.json()
+        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=10", timeout=3)
+        data = r.json()
     except:
-    return jsonify([])
-        markets = data if isinstance(data, list) else data.get("markets", [])
-        markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
-        result = []
-        for m in markets:
-            prob = 50
-            try:
-                prices = m.get("outcomePrices", "")
-                if isinstance(prices, str):
-                    prices = json.loads(prices)
-                if prices:
-                    prob = round(float(prices[0]) *
- if __name__ == "__main__":
+        return jsonify([])
+
+    markets = data if isinstance(data, list) else data.get("markets", [])
+    markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
+
+    result = []
+    for m in markets:
+        prob = 50
+        try:
+            prices = m.get("outcomePrices", "")
+            if isinstance(prices, str):
+                prices = json.loads(prices)
+            if prices:
+                prob = round(float(prices[0]) * 100)
+        except:
+            pass
+
+        result.append({
+            "question": m.get("question", "Sin pregunta"),
+            "prob": prob,
+            "volume": "Volumen N/A",
+            "tag": "Polymarket"
+        })
+
+    return jsonify(result)
+
+if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
