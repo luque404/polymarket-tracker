@@ -96,7 +96,7 @@ async function loadMetrics(){
 async function loadMarkets(){
   document.getElementById("markets").innerHTML = "<div style='color:#888;font-size:13px;padding:10px 0'>Cargando mercados...</div>";
   const d = await api("/markets");
-  if(!d.length){ document.getElementById("markets").innerHTML = "<div style='color:#888;font-size:13px;padding:10px 0'>No se encontraron mercados.</div>"; return; }
+  if(!d.length){ document.getElementById("").innerHTML = "<div style='color:#888;font-size:13px;padding:10px 0'>No se encontraron mercados.</div>"; return; }
   document.getElementById("markets").innerHTML = d.map((m,i)=>`
     <div class="card">
       <div class="row" style="margin-bottom:10px;">
@@ -159,8 +159,10 @@ def metrics():
 @app.route("/markets")
 def get_markets():
     try:
-        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=10", timeout=5)
-        data = r.json()
+    r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=10", timeout=3)
+    data = r.json()
+    except:
+    return jsonify([])
         markets = data if isinstance(data, list) else data.get("markets", [])
         markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
         result = []
