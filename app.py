@@ -7,6 +7,11 @@ from datetime import datetime
 
 app = Flask(__name__)
 
+# Ruta de test para la raíz
+@app.route("/")
+def home():
+    return "Bot de Polymarket funcionando 🔥"
+
 # Estado del bot en memoria
 state = {
     "balance": 1000.0,
