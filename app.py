@@ -163,32 +163,9 @@ def metrics():
 
 @app.route("/markets")
 def get_markets():
-    try:
-        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=10", timeout=3)
-        data = r.json()
-    except:
-        return jsonify([])
-
-    markets = data if isinstance(data, list) else data.get("markets", [])
-    markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
-
-    result = []
-    for m in markets:
-        prob = 50
-        try:
-            prices = m.get("outcomePrices", "")
-            if isinstance(prices, str):
-                prices = json.loads(prices)
-            if prices:
-                prob = round(float(prices[0]) * 100)
-        except:
-            pass
-
-        result.append({
-            "question": m.get("question", "Sin pregunta"),
-            "prob": prob,
-            "volume": "Volumen N/A",
-            "tag": "Polymarket"
+    # Test simple para Railway: no llamamos a Polymarket todavía
+    return jsonify([
+        {"question": "Test funcionando 🔥", "prob": 50, "volume": "N/A", "tag": "Polymarket"}
         })
 
     return jsonify(result)
