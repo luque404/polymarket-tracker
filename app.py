@@ -193,7 +193,9 @@ Analiza este mercado y responde SOLO en este formato JSON exacto, sin texto adic
         )
         data = r.json()
         text = data["content"][0]["text"].strip()
-        parsed = json.loads(text)
+        import re
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        parsed = json.loads(match.group()) if match else json.loads(text)
         return parsed, None
     except Exception as e:
         return None, str(e)
