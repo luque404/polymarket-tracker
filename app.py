@@ -210,11 +210,50 @@ def manual_bet():
         return jsonify({"ok": True})
     except: return jsonify({"ok": False})
 
+def get_news(query):
+    """Busca noticias relevantes para un mercado"""
+    try:
+        news_key = os.environ.get("NEWS_API_KEY")
+        url = f"https://newsapi.org/v2/everything?q={query}&pageSize=3&sortBy=publishedAt&apiKey={news_key}"
+        r = requests.get(url, timeout=5)
+        articles = r.json().get("articles", [])
+        if not articles:
+            return "Sin noticias recientes."
+        return " | ".join([a["title"] for a in articles[:3]])
+    except:
+        return "Sin noticias disponibles."
+
 def analyze_with_claude(markets_data):
-    """Usa Claude para analizar mercados y decidir dónde apostar"""
-    markets_text = "\n".join([
-        f"- {m['question']} | Precio mercado: {m['prob']}% SÍ | Volumen: {m['volume']}"
-        for m in markets_data
+    markets_text = ""
+    for i, m in enumerate(markets_data):
+        keywords = m['question'][:50].replace("?","")
+        news = get_news(keywords)
+        markets_text += f"\nMercado {i}: {m['question']}\nPrecio: {m['prob']}% SÍ | Volumen: {m['volume']}\nNoticias: {news}\n"
+
+    prompt = f"""Sos un trader experto en mercados de predicción. Analizá estos mercados con sus noticias recientes:
+
+{markets_text}
+
+Respondé SOLO en este formato JSON:
+{{
+  "market_index": 0,
+  "side": "SÍ",
+  "confidence": 0.65,
+  "reason": "Explicación breve basada en las noticias"
+}}
+
+Solo apostá si las noticias muestran ventaja real vs el precio del mercado. Si no hay ventaja clara, poné confidence igual al precio del mercado."""
+
+    response = claude.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    raw = response.content[0].text.strip()
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start == -1: raise ValueError("No JSON found")
+    return json.loads(raw[start:end])
     ])
 
     prompt = f"""Sos un trader experto en mercados de predicción. Analizá estos mercados de Polymarket y elegí el mejor para apostar:
