@@ -1,10 +1,11 @@
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request as req
 import requests
 import json
 import random
 import os
 import threading
 from datetime import datetime
+import anthropic
 
 app = Flask(__name__)
 
@@ -17,6 +18,7 @@ state = {
 }
 
 GAMMA_API = "https://gamma-api.polymarket.com"
+claude = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 HTML = """
 <!DOCTYPE html>
@@ -58,13 +60,14 @@ h1 { font-size: 20px; font-weight: 500; margin-bottom: 4px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; display: inline-block; margin-right: 8px; animation: pulse 2s infinite; }
 .section-title { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin: 16px 0 8px; }
 .empty { color: #888; font-size: 13px; }
+.ai-reason { font-size: 12px; color: #888; margin-top: 8px; padding: 8px; background: #111; border-radius: 6px; border-left: 2px solid #4caf50; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 @media(max-width:500px){ .metrics{grid-template-columns:repeat(2,1fr);} }
 </style>
 </head>
 <body>
 <h1>Polymarket Tracker</h1>
-<div class="sub">Paper trading · Saldo ficticio · Corriendo 24/7</div>
+<div class="sub">Paper trading · IA Claude · Corriendo 24/7</div>
 
 <div class="metrics">
   <div class="metric"><div class="metric-label">Saldo</div><div class="metric-value" id="balance">$1000</div></div>
@@ -75,12 +78,13 @@ h1 { font-size: 20px; font-weight: 500; margin-bottom: 4px; }
 
 <div class="card">
   <div class="row">
-    <div><span class="dot"></span><span id="bot-status">Analizando mercados...</span></div>
+    <div><span class="dot"></span><span id="bot-status">Bot con IA listo</span></div>
     <div style="display:flex;gap:8px;">
       <button class="btn" onclick="loadMarkets()">Actualizar</button>
-      <button class="btn btn-primary" onclick="botBet()">Apostar ahora</button>
+      <button class="btn btn-primary" onclick="botBet()">Analizar con IA</button>
     </div>
   </div>
+  <div id="ai-reason" class="ai-reason" style="display:none"></div>
 </div>
 
 <div class="section-title">Mercados activos</div>
@@ -125,9 +129,14 @@ async function manualBet(i){
   await loadMetrics(); await loadBets();
 }
 async function botBet(){
-  document.getElementById("bot-status").textContent = "Analizando con IA...";
+  document.getElementById("bot-status").textContent = "Claude analizando mercados...";
+  document.getElementById("ai-reason").style.display = "none";
   const d = await fetch("/bot-bet", {method:"POST"}).then(r=>r.json());
   document.getElementById("bot-status").textContent = d.message;
+  if(d.reason){
+    document.getElementById("ai-reason").style.display = "block";
+    document.getElementById("ai-reason").textContent = "🤖 " + d.reason;
+  }
   await loadMetrics(); await loadBets();
 }
 async function loadBets(){
@@ -183,7 +192,6 @@ def get_markets():
 
 @app.route("/bet", methods=["POST"])
 def manual_bet():
-    from flask import request as req
     idx = int(req.args.get("idx", 0))
     try:
         r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=10", timeout=5)
@@ -202,6 +210,41 @@ def manual_bet():
         return jsonify({"ok": True})
     except: return jsonify({"ok": False})
 
+def analyze_with_claude(markets_data):
+    """Usa Claude para analizar mercados y decidir dónde apostar"""
+    markets_text = "\n".join([
+        f"- {m['question']} | Precio mercado: {m['prob']}% SÍ | Volumen: {m['volume']}"
+        for m in markets_data
+    ])
+
+    prompt = f"""Sos un trader experto en mercados de predicción. Analizá estos mercados de Polymarket y elegí el mejor para apostar:
+
+{markets_text}
+
+Respondé SOLO en este formato JSON (sin markdown, sin texto extra):
+{{
+  "market_index": 0,
+  "side": "SÍ",
+  "confidence": 0.65,
+  "reason": "Explicación breve en español de por qué apostás esto"
+}}
+
+Reglas:
+- market_index: número del mercado (0 al {len(markets_data)-1})
+- side: "SÍ" o "NO"
+- confidence: tu probabilidad estimada (0.0 a 1.0)
+- reason: máximo 100 caracteres
+- Solo apostá si ves ventaja real vs el precio del mercado"""
+
+    response = claude.messages.create(
+        model="claude-haiku-20240307",
+        max_tokens=200,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    raw = response.content[0].text.strip()
+    return json.loads(raw)
+
 @app.route("/bot-bet", methods=["POST"])
 def bot_bet():
     try:
@@ -209,26 +252,59 @@ def bot_bet():
         data = r.json()
         markets = data if isinstance(data, list) else data.get("markets", [])
         markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
-        available = []
+
+        markets_data = []
+        market_probs = []
         for m in markets:
             try:
                 prices = m.get("outcomePrices", "")
                 if isinstance(prices, str): prices = json.loads(prices)
-                if prices:
-                    prob = float(prices[0])
-                    if 0.25 < prob < 0.75: available.append((m, prob))
-            except: pass
-        if not available: return jsonify({"message": "Sin oportunidades claras ahora — esperando"})
-        m, market_prob = random.choice(available)
-        ai_prob = max(0.1, min(0.9, market_prob + random.uniform(-0.15, 0.15)))
+                prob = float(prices[0]) if prices else 0.5
+            except:
+                prob = 0.5
+            vol = float(m.get("volume", 0))
+            vol_str = f"${vol/1000000:.1f}M" if vol>1000000 else f"${vol/1000:.0f}K"
+            markets_data.append({
+                "question": m.get("question","")[:80],
+                "prob": round(prob * 100),
+                "volume": vol_str
+            })
+            market_probs.append(prob)
+
+        if not markets_data:
+            return jsonify({"message": "Sin mercados disponibles", "reason": None})
+
+        # Llamar a Claude
+        analysis = analyze_with_claude(markets_data)
+
+        idx = analysis.get("market_index", 0)
+        side = analysis.get("side", "SÍ")
+        confidence = analysis.get("confidence", 0.5)
+        reason = analysis.get("reason", "")
+
+        if idx >= len(markets_data):
+            return jsonify({"message": "Sin oportunidad clara", "reason": reason})
+
+        market_prob = market_probs[idx]
+        ai_prob = confidence
         edge = abs(ai_prob - market_prob)
-        if edge < 0.05: return jsonify({"message": "Sin ventaja suficiente — esperando mejor oportunidad"})
-        side = "SÍ" if ai_prob > market_prob else "NO"
+
+        if edge < 0.04:
+            return jsonify({
+                "message": "Sin ventaja suficiente — esperando mejor oportunidad",
+                "reason": reason
+            })
+
         amount = min(50, round(state["balance"] * 0.05))
-        place_bet(m.get("question","")[:80], side, amount, market_prob)
-        return jsonify({"message": f"Apuesta colocada: {side} con ${amount} USDC ficticio"})
+        place_bet(markets_data[idx]["question"], side, amount, market_prob)
+
+        return jsonify({
+            "message": f"✅ Apuesta: {side} ${amount} USDC ficticio",
+            "reason": reason
+        })
+
     except Exception as e:
-        return jsonify({"message": "Error al analizar mercados"})
+        return jsonify({"message": f"Error: {str(e)}", "reason": None})
 
 @app.route("/bets")
 def get_bets():
