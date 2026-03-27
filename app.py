@@ -243,7 +243,11 @@ Reglas:
     )
 
     raw = response.content[0].text.strip()
-    return json.loads(raw)
+    # Extraer solo el JSON
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start == -1: raise ValueError("No JSON found")
+    return json.loads(raw[start:end])
 
 @app.route("/bot-bet", methods=["POST"])
 def bot_bet():
