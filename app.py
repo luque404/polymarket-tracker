@@ -167,8 +167,10 @@ def metrics():
 @app.route("/markets")
 def get_markets():
     try:
-        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=10", timeout=5)
+        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=10", timeout=2)
+        print("Status code:", r.status_code)
         data = r.json()
+        print("Data:", data)
         markets = data if isinstance(data, list) else data.get("markets", [])
         markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
         result = []
@@ -178,12 +180,15 @@ def get_markets():
                 prices = m.get("outcomePrices", "")
                 if isinstance(prices, str): prices = json.loads(prices)
                 if prices: prob = round(float(prices[0]) * 100)
-            except: pass
+            except Exception as e:
+                print("Price parse error:", e)
             vol = float(m.get("volume", 0))
             vol_str = f"${vol/1000000:.1f}M vol" if vol>1000000 else f"${vol/1000:.0f}K vol" if vol>1000 else "—"
             result.append({"question": m.get("question","")[:80], "prob": prob, "volume": vol_str})
         return jsonify(result)
-    except: return jsonify([])
+    except Exception as e:
+        print("GET /markets error:", e)
+        return jsonify([])
 
 @app.route("/bet", methods=["POST"])
 def manual_bet():
