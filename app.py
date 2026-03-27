@@ -173,11 +173,9 @@ markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
                 if prices: prob = round(float(prices[0]) * 100)
             except: pass
             vol = float(m.get("volume", 0))
-            vol_str = f"vol/1000000:.1fMvol"ifvol>1000000elsef"{vol/1000000:.1f}M vol" if vol>1000000 else f"
-vol/1000000:.1fMvol"ifvol>1000000elsef"{vol/1000:.0f}K vol" if vol>1000 else "—"
-            result.append({"question": m.get("question","")[
-:80], "prob": prob, "volume": vol_str})
-return jsonify(result)
+            vol_str = f"${vol/1000000:.1f}M vol" if vol>1000000 else f"${vol/1000:.0f}K vol" if vol>1000 else "—"
+            result.append({"question": m.get("question","")[:80], "prob": prob, "volume": vol_str})
+        return jsonify(result)
 except: return jsonify([])
 @app.route("/bet", methods=["POST"])
 def manual_bet():
