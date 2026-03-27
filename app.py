@@ -50,7 +50,8 @@ def metrics():
 def get_markets():
     logging.info("GET /markets called")
     try:
-        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=10", timeout=2)
+        # timeout muy corto para que no cuelgue Railway
+        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=10", timeout=1.5)
         data = r.json()
         markets = data if isinstance(data, list) else data.get("markets", [])
         markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
@@ -70,6 +71,7 @@ def get_markets():
         return jsonify(result if result else [{"question":"No se pudieron cargar mercados","prob":0,"volume":"—"}])
     except Exception as e:
         logging.error("GET /markets error: %s", e)
+        # si falla, devolvemos algo rápido para no colgar
         return jsonify([{"question":"Error al conectar Polymarket","prob":0,"volume":"—"}])
 
 # --- resto de rutas IGUAL que tenías ---
