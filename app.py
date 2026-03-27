@@ -193,7 +193,9 @@ Analiza este mercado y responde SOLO en este formato JSON exacto, sin texto adic
         )
         data = r.json()
         text = data["content"][0]["text"].strip()
-        parsed = json.loads(text)
+start = text.find("{")
+end = text.rfind("}") + 1
+parsed = json.loads(text[start:end])
         return parsed, None
     except Exception as e:
         return None, str(e)
