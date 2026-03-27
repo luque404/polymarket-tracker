@@ -161,9 +161,66 @@ def get_markets():
         return jsonify(result)
     except: return jsonify([])
 
+def get_news(question):
+    news_key = os.environ.get("NEWS_API_KEY", "")
+    if not news_key:
+        return ""
+    try:
+        words = question.split()[:4]
+        query = " ".join(words)
+        r = requests.get(
+            "https://newsapi.org/v2/everything",
+            params={"q": query, "pageSize": 3, "sortBy": "publishedAt", "apiKey": news_key},
+            timeout=5
+        )
+        articles = r.json().get("articles", [])
+        if not articles:
+            return ""
+        headlines = [a["title"] for a in articles[:3] if a.get("title")]
+        return "Noticias recientes: " + " | ".join(headlines)
+    except:
+        return ""
+
 def ask_claude(question, market_prob):
     if not ANTHROPIC_API_KEY:
         return None, "Sin API key de Claude"
+    try:
+        news_context = get_news(question)
+        prompt = f"""Eres un analista experto en mercados de prediccion.
+
+Mercado: "{question}"
+Probabilidad actual del mercado: {round(market_prob*100)}%
+{news_context}
+
+Analiza este mercado y responde SOLO en este formato JSON exacto, sin texto adicional:
+{{"prob": 65, "side": "SI", "reasoning": "explicacion breve en español"}}
+
+- prob: tu estimacion de probabilidad del evento (0-100)
+- side: "SI" o "NO"
+- reasoning: max 100 caracteres explicando por que"""
+
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 200,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=15
+        )
+        data = r.json()
+        text = data["content"][0]["text"].strip()
+        import re
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        parsed = json.loads(match.group()) if match else json.loads(text)
+        return parsed, None
+    except Exception as e:
+        return None, str(e)
     try:
         prompt = f"""Eres un analista experto en mercados de prediccion.
 
