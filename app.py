@@ -222,6 +222,27 @@ def get_news(query):
         return " | ".join([a["title"] for a in articles[:3]])
     except:
         return "Sin noticias disponibles."
+        def save_prediction(market, prediction):
+    """Guarda cada predicción para medir aciertos después"""
+    record = {
+        "timestamp": datetime.now().isoformat(),
+        "question": market["question"],
+        "market_price": market["prob"],
+        "our_side": prediction["side"],
+        "our_confidence": prediction["confidence"],
+        "reason": prediction["reason"],
+        "resolved": None,
+        "correct": None
+    }
+    
+    records = []
+    if os.path.exists("predictions.json"):
+        with open("predictions.json", "r") as f:
+            records = json.load(f)
+    
+    records.append(record)
+    with open("predictions.json", "w") as f:
+        json.dump(records, f, indent=2)
 
 def analyze_with_claude(markets_data):
     markets_text = ""
@@ -319,6 +340,7 @@ def bot_bet():
 
         # Llamar a Claude
         analysis = analyze_with_claude(markets_data)
+        save_prediction(markets_data[analysis["market_index"]], analysis)
 
         idx = analysis.get("market_index", 0)
         side = analysis.get("side", "SÍ")
