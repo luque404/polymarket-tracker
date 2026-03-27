@@ -9,8 +9,8 @@ from datetime import datetime
 app = Flask(__name__)
 
 state = {
-    "balance": 1000.0,
-    "initial_balance": 1000.0,
+    "balance": 10000.0,
+    "initial_balance": 10000.0,
     "bets": [],
     "won": 0,
     "lost": 0
@@ -297,7 +297,7 @@ def resolve_bet(bet_id):
 def auto_bet_loop():
     import time
     while True:
-        time.sleep(3600)
+        time.sleep(900)
         try:
             with app.test_request_context():
                 bot_bet()
