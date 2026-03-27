@@ -294,7 +294,17 @@ def resolve_bet(bet_id):
     else:
         bet["pnl"] = -bet["amount"]
         state["lost"] += 1
+def auto_bet_loop():
+    import time
+    while True:
+        time.sleep(3600)
+        try:
+            with app.test_request_context():
+                bot_bet()
+        except: pass
 
+auto_thread = threading.Thread(target=auto_bet_loop, daemon=True)
+auto_thread.start()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
