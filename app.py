@@ -302,11 +302,13 @@ def ask_claude(question, market_prob):
         return None, "Sin API key de Claude"
     try:
         news_context = get_news(question)
+        wiki_context = get_wikipedia(question)
         prompt = f"""Eres un analista experto en mercados de prediccion.
 
 Mercado: "{question}"
 Probabilidad actual del mercado: {round(market_prob*100)}%
 {news_context}
+{wiki_context}
 
 Analiza este mercado y responde SOLO en este formato JSON exacto, sin texto adicional:
 {{"prob": 65, "side": "SI", "reasoning": "explicacion breve en español"}}
