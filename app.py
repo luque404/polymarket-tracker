@@ -668,7 +668,7 @@ def bot_bet():
                 end_date = m.get("endDate", m.get("end_date",""))
                 if end_date:
                     end = datetime.fromisoformat(end_date.replace("Z","+00:00"))
-                    if (end - now_utc).days > 90 or (end - now_utc).days < 1:
+                    if (end - now_utc).days > 365 or (end - now_utc).days < 1:
                         continue
                 available.append((m, prob))
             except:
