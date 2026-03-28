@@ -10,13 +10,43 @@ from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 
-state = {
-    "balance": 10000.0,
-    "initial_balance": 10000.0,
-    "bets": [],
-    "won": 0,
-    "lost": 0
-}
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+def get_db():
+    return psycopg2.connect(DATABASE_URL)
+
+def init_db():
+    if not DATABASE_URL:
+        return
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bets (
+                id TEXT PRIMARY KEY,
+                question TEXT,
+                side TEXT,
+                amount REAL,
+                prob REAL,
+                status TEXT,
+                pnl REAL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        cur.execute("INSERT INTO state (key, value) VALUES ('balance', '10000.0') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO state (key, value) VALUES ('won', '0') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO state (key, value) VALUES ('lost', '0') ON CONFLICT DO NOTHING")
+        conn.commit()
+        cur.close()
+        conn.close()
+    except: pass
+
+init_db()
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
