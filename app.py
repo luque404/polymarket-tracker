@@ -408,27 +408,31 @@ def get_bets():
     return jsonify(result)
 
 def place_bet(question, side, amount, prob):
-    if state["balance"] < amount: return
-    state["balance"] -= amount
+    balance = get_state_value("balance", 10000)
+    if balance < amount: return
+    set_state_value("balance", balance - amount)
     bet = {"id": str(datetime.now().timestamp()), "question": question, "side": side, "amount": amount, "prob": prob, "status": "open", "pnl": 0}
-    state["bets"].insert(0, bet)
+    save_bet(bet)
     t = threading.Timer(random.uniform(5, 20), resolve_bet, args=[bet["id"]])
     t.daemon = True
     t.start()
 
 def resolve_bet(bet_id):
-    bet = next((b for b in state["bets"] if b["id"]==bet_id), None)
+    bets = get_all_bets()
+    bet = next((b for b in bets if b["id"]==bet_id), None)
     if not bet or bet["status"]!="open": return
     won = random.random() < 0.52
     bet["status"] = "won" if won else "lost"
     if won:
         winnings = bet["amount"] * (1/bet["prob"]-1) * 0.95
         bet["pnl"] = round(winnings, 2)
-        state["balance"] += bet["amount"] + winnings
-        state["won"] += 1
+        balance = get_state_value("balance", 10000)
+        set_state_value("balance", balance + bet["amount"] + winnings)
+        set_state_value("won", get_state_value("won", 0) + 1)
     else:
         bet["pnl"] = -bet["amount"]
-        state["lost"] += 1
+        set_state_value("lost", get_state_value("lost", 0) + 1)
+    save_bet(bet)
 def auto_bet_loop():
     import time
     while True:
