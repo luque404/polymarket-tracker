@@ -46,7 +46,7 @@ def init_db():
         conn = get_db()
         cur  = conn.cursor()
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS bets (
+            CREATE TABLE bets (
                 id               TEXT PRIMARY KEY,
                 question         TEXT,
                 market_id        TEXT,
