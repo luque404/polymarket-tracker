@@ -165,12 +165,58 @@ setInterval(function(){ loadMetrics(); loadBets(); }, 8000);
 def index():
     return render_template_string(HTML)
 
+def get_state_value(key, default):
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM state WHERE key = %s", (key,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return float(row[0]) if row else default
+    except: return default
+
+def set_state_value(key, value):
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO state (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = %s", (key, str(value), str(value)))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except: pass
+
+def get_all_bets():
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM bets ORDER BY id DESC")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(r) for r in rows]
+    except: return []
+
+def save_bet(bet):
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO bets (id, question, side, amount, prob, status, pnl) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET status = %s, pnl = %s",
+            (bet["id"], bet["question"], bet["side"], bet["amount"], bet["prob"], bet["status"], bet["pnl"], bet["status"], bet["pnl"]))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except: pass
+
 @app.route("/metrics")
 def metrics():
-    open_bets = [b for b in state["bets"] if b["status"] == "open"]
-    total = state["won"] + state["lost"]
-    winrate = str(round((state["won"]/total)*100))+"%" if total > 0 else "—"
-    return jsonify({"balance": state["balance"], "open": len(open_bets), "winrate": winrate})
+    bets = get_all_bets()
+    open_bets = [b for b in bets if b["status"] == "open"]
+    won = int(get_state_value("won", 0))
+    lost = int(get_state_value("lost", 0))
+    total = won + lost
+    winrate = str(round((won/total)*100))+"%" if total > 0 else "—"
+    return jsonify({"balance": get_state_value("balance", 10000), "open": len(open_bets), "winrate": winrate})
 
 @app.route("/markets")
 def get_markets():
