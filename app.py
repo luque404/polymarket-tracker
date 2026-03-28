@@ -315,7 +315,8 @@ Analiza este mercado y responde SOLO en este formato JSON exacto, sin texto adic
 
 - prob: tu estimacion de probabilidad del evento (0-100)
 - side: "SI" o "NO"
-- reasoning: max 100 caracteres explicando por que"""
+- reasoning: max 100 caracteres explicando por que
+- confidence: numero del 1 al 10 indicando cuanta informacion real tenes para decidir (1=casi nada, 10=mucho contexto)"""
 
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
@@ -426,13 +427,14 @@ def bot_bet():
             ai_prob = claude_result["prob"] / 100
             side = claude_result["side"]
             reasoning = claude_result.get("reasoning", "")
+            confidence_score = claude_result.get("confidence", 5)
             edge = abs(ai_prob - market_prob)
-            if edge < 0.05:
+            if edge < 0.05 or confidence_score < 4:
                 return jsonify({"message": "Claude: sin ventaja suficiente en este mercado", "reasoning": reasoning})
             confidence = abs(claude_result["prob"] - round(market_prob*100))
-            if confidence > 20:
+            if confidence > 20 and confidence_score >= 7:
                 pct = 0.08
-            elif confidence > 10:
+            elif confidence > 10 and confidence_score >= 5:
                 pct = 0.05
             else:
                 pct = 0.03
