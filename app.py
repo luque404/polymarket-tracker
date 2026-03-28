@@ -350,7 +350,7 @@ def bot_bet():
                     prob = float(prices[0])
                     vol = float(m.get("volume", 0))
                     if 0.2 < prob < 0.8 and vol > 100000:
-                    available.append((m, prob))
+                        available.append((m, prob))
             except:
                 pass
         existing_bets = get_all_bets()
