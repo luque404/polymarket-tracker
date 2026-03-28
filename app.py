@@ -351,15 +351,6 @@ def bot_bet():
                     vol = float(m.get("volume", 0))
                     end_date = m.get("endDate", m.get("end_date", ""))
 end_date = m.get("endDate", m.get("end_date", ""))
-                if end_date:
-                    try:
-                        from datetime import timezone
-                        end = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-                        days_left = (end - datetime.now(timezone.utc)).days
-                        if days_left > 20:
-                            continue
-                    except:
-                        pass
                 if 0.2 < prob < 0.8 and vol > 100000:
                     available.append((m, prob))
             except:
