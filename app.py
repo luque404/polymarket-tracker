@@ -390,10 +390,10 @@ def bot_bet():
                         try:
                             from datetime import timezone
                             end = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-                            days_ok = (end - datetime.now(timezone.utc)).days <= 45
+                            days_ok = (end - datetime.now(timezone.utc)).days <= 90
                         except:
                             days_ok = True
-                    if 0.2 < prob < 0.8 and vol > 50000 and days_ok:
+                    if 0.2 < prob < 0.8 and vol > 10000 and days_ok:
                         available.append((m, prob))
             except:
                 pass
