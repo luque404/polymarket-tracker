@@ -46,7 +46,7 @@ def init_db():
         conn = get_db()
         cur  = conn.cursor()
         cur.execute("""
-            CREATE TABLE bets (
+            CREATE TABLE IF NOT EXISTS bets (
                 id               TEXT PRIMARY KEY,
                 question         TEXT,
                 market_id        TEXT,
@@ -69,6 +69,19 @@ def init_db():
                 resolved_at      TIMESTAMPTZ
             )
         """)
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS market_id TEXT")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS prob_claude REAL")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS edge REAL")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS confidence INTEGER")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS kelly_f REAL")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS reasoning TEXT")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS sources_used TEXT")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS price_entry REAL")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS price_current REAL")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS take_profit_hit BOOLEAN DEFAULT FALSE")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS stop_loss_hit BOOLEAN DEFAULT FALSE")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS state (
                 key   TEXT PRIMARY KEY,
