@@ -47,7 +47,7 @@ def init_db():
         cur  = conn.cursor()
         cur.execute("DROP TABLE IF EXISTS bets")
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS bets (
+            CREATE TABLE bets (
                 id               TEXT PRIMARY KEY,
                 question         TEXT,
                 market_id        TEXT,
@@ -70,19 +70,6 @@ def init_db():
                 resolved_at      TIMESTAMPTZ
             )
         """)
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS market_id TEXT")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS prob_claude REAL")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS edge REAL")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS confidence INTEGER")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS kelly_f REAL")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS reasoning TEXT")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS sources_used TEXT")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS price_entry REAL")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS price_current REAL")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS take_profit_hit BOOLEAN DEFAULT FALSE")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS stop_loss_hit BOOLEAN DEFAULT FALSE")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS state (
                 key   TEXT PRIMARY KEY,
@@ -99,7 +86,6 @@ def init_db():
                 snapped_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
-        # state defaults
         for k, v in [("balance","10000.0"),("won","0"),("lost","0"),("total_edge","0"),("bets_placed","0")]:
             cur.execute("INSERT INTO state(key,value) VALUES(%s,%s) ON CONFLICT DO NOTHING",(k,v))
         conn.commit()
