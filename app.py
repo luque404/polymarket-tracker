@@ -10,7 +10,10 @@ from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 
+GAMMA_API = "https://gamma-api.polymarket.com"
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
@@ -44,12 +47,10 @@ def init_db():
         conn.commit()
         cur.close()
         conn.close()
-    except: pass
+    except:
+        pass
 
 init_db()
-
-GAMMA_API = "https://gamma-api.polymarket.com"
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 HTML = """<!DOCTYPE html>
 <html>
@@ -99,7 +100,7 @@ h1 { font-size: 20px; font-weight: 500; margin-bottom: 4px; }
 <h1>Polymarket Tracker</h1>
 <div class="sub">Paper trading · Saldo ficticio · Claude AI</div>
 <div class="metrics">
-  <div class="metric"><div class="metric-label">Saldo</div><div class="metric-value" id="balance">$1000</div></div>
+  <div class="metric"><div class="metric-label">Saldo</div><div class="metric-value" id="balance">$10000</div></div>
   <div class="metric"><div class="metric-label">P&L</div><div class="metric-value" id="pnl">$0</div></div>
   <div class="metric"><div class="metric-label">Abiertas</div><div class="metric-value" id="open-count">0</div></div>
   <div class="metric"><div class="metric-label">Win rate</div><div class="metric-value" id="winrate">—</div></div>
@@ -174,7 +175,8 @@ def get_state_value(key, default):
         cur.close()
         conn.close()
         return float(row[0]) if row else default
-    except: return default
+    except:
+        return default
 
 def set_state_value(key, value):
     try:
@@ -184,7 +186,8 @@ def set_state_value(key, value):
         conn.commit()
         cur.close()
         conn.close()
-    except: pass
+    except:
+        pass
 
 def get_all_bets():
     try:
@@ -195,7 +198,8 @@ def get_all_bets():
         cur.close()
         conn.close()
         return [dict(r) for r in rows]
-    except: return []
+    except:
+        return []
 
 def save_bet(bet):
     try:
@@ -206,7 +210,8 @@ def save_bet(bet):
         conn.commit()
         cur.close()
         conn.close()
-    except: pass
+    except:
+        pass
 
 @app.route("/metrics")
 def metrics():
@@ -230,25 +235,28 @@ def get_markets():
             prob = 50
             try:
                 prices = m.get("outcomePrices", "")
-                if isinstance(prices, str): prices = json.loads(prices)
-                if prices: prob = round(float(prices[0]) * 100)
-            except: pass
+                if isinstance(prices, str):
+                    prices = json.loads(prices)
+                if prices:
+                    prob = round(float(prices[0]) * 100)
+            except:
+                pass
             vol = float(m.get("volume", 0))
             vol_str = "$"+str(round(vol/1000000,1))+"M vol" if vol>1000000 else "$"+str(round(vol/1000))+"K vol" if vol>1000 else "—"
             result.append({"question": m.get("question","")[:80], "prob": prob, "volume": vol_str})
         return jsonify(result)
-    except: return jsonify([])
+    except:
+        return jsonify([])
 
 def get_news(question):
-    news_key = os.environ.get("NEWS_API_KEY", "")
-    if not news_key:
+    if not NEWS_API_KEY:
         return ""
     try:
         words = question.split()[:4]
         query = " ".join(words)
         r = requests.get(
             "https://newsapi.org/v2/everything",
-            params={"q": query, "pageSize": 3, "sortBy": "publishedAt", "apiKey": news_key},
+            params={"q": query, "pageSize": 3, "sortBy": "publishedAt", "apiKey": NEWS_API_KEY},
             timeout=5
         )
         articles = r.json().get("articles", [])
@@ -299,41 +307,6 @@ Analiza este mercado y responde SOLO en este formato JSON exacto, sin texto adic
         return parsed, None
     except Exception as e:
         return None, str(e)
-    try:
-        prompt = f"""Eres un analista experto en mercados de prediccion.
-
-Mercado: "{question}"
-Probabilidad actual del mercado: {round(market_prob*100)}%
-
-Analiza este mercado y responde SOLO en este formato JSON exacto, sin texto adicional:
-{{"prob": 65, "side": "SI", "reasoning": "explicacion breve en español"}}
-
-- prob: tu estimacion de probabilidad del evento (0-100)
-- side: "SI" o "NO" segun si crees que el evento ocurrira
-- reasoning: max 100 caracteres explicando por que"""
-
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 200,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=15
-        )
-        data = r.json()
-        text = data["content"][0]["text"].strip()
-        import re
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        parsed = json.loads(match.group()) if match else json.loads(text)
-        return parsed, None
-    except Exception as e:
-        return None, str(e)
 
 @app.route("/bet", methods=["POST"])
 def manual_bet():
@@ -343,17 +316,22 @@ def manual_bet():
         data = r.json()
         markets = data if isinstance(data, list) else data.get("markets", [])
         markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
-        if idx >= len(markets): return jsonify({"ok": False})
+        if idx >= len(markets):
+            return jsonify({"ok": False})
         m = markets[idx]
         prob = 0.5
         try:
             prices = m.get("outcomePrices", "")
-            if isinstance(prices, str): prices = json.loads(prices)
-            if prices: prob = float(prices[0])
-        except: pass
+            if isinstance(prices, str):
+                prices = json.loads(prices)
+            if prices:
+                prob = float(prices[0])
+        except:
+            pass
         place_bet(m.get("question","")[:80], "SI" if prob>=0.5 else "NO", 25, prob)
         return jsonify({"ok": True})
-    except: return jsonify({"ok": False})
+    except:
+        return jsonify({"ok": False})
 
 @app.route("/bot-bet", methods=["POST"])
 def bot_bet():
@@ -413,42 +391,6 @@ def bot_bet():
             return jsonify({"message": "Apuesta colocada: "+side+" $"+str(amount), "reasoning": "Modo aleatorio: "+str(error)})
     except Exception as e:
         return jsonify({"message": "Error: "+str(e), "reasoning": ""})
-existing_bets = get_all_bets()
-existing_questions = [b["question"] for b in existing_bets if b["status"] == "open"]
-available = [(m, p) for m, p in available if m.get("question","")[:80] not in existing_questions]
-if not available:
-    return jsonify({"message": "Ya apostado en todos los mercados disponibles", "reasoning": ""})
-        m, market_prob = random.choice(available)
-        question = m.get("question","")[:80]
-        claude_result, error = ask_claude(question, market_prob)
-        if claude_result:
-            ai_prob = claude_result["prob"] / 100
-            side = claude_result["side"]
-            reasoning = claude_result.get("reasoning", "")
-            edge = abs(ai_prob - market_prob)
-            if edge < 0.05:
-                return jsonify({"message": "Claude: sin ventaja suficiente en este mercado", "reasoning": reasoning})
-            confidence = abs(claude_result["prob"] - round(market_prob*100))
-if confidence > 20:
-    pct = 0.08
-elif confidence > 10:
-    pct = 0.05
-else:
-    pct = 0.03
-amount = min(200, round(get_state_value("balance", 10000) * pct))
-            place_bet(question, side, amount, market_prob)
-            return jsonify({"message": "Claude aposto: "+side+" con $"+str(amount)+" USDC", "reasoning": reasoning})
-        else:
-            ai_prob = max(0.1, min(0.9, market_prob + random.uniform(-0.15, 0.15)))
-            edge = abs(ai_prob - market_prob)
-            if edge < 0.05:
-                return jsonify({"message": "Sin ventaja suficiente", "reasoning": ""})
-            side = "SI" if ai_prob > market_prob else "NO"
-            amount = min(50, round(get_state_value("balance", 10000) * 0.03))
-            place_bet(question, side, amount, market_prob)
-            return jsonify({"message": "Apuesta colocada: "+side+" $"+str(amount), "reasoning": "Modo aleatorio: "+str(error)})
-    except Exception as e:
-        return jsonify({"message": "Error: "+str(e), "reasoning": ""})
 
 @app.route("/bets")
 def get_bets():
@@ -462,9 +404,9 @@ def get_bets():
     return jsonify(result)
 
 def place_bet(question, side, amount, prob):
-    balance = get_state_value("balance", 10000)
-    if balance < amount: return
-    set_state_value("balance", balance - amount)
+    if get_state_value("balance", 10000) < amount:
+        return
+    set_state_value("balance", get_state_value("balance", 10000) - amount)
     bet = {"id": str(datetime.now().timestamp()), "question": question, "side": side, "amount": amount, "prob": prob, "status": "open", "pnl": 0}
     save_bet(bet)
     t = threading.Timer(random.uniform(5, 20), resolve_bet, args=[bet["id"]])
@@ -474,7 +416,8 @@ def place_bet(question, side, amount, prob):
 def resolve_bet(bet_id):
     bets = get_all_bets()
     bet = next((b for b in bets if b["id"]==bet_id), None)
-    if not bet or bet["status"]!="open": return
+    if not bet or bet["status"]!="open":
+        return
     won = random.random() < 0.52
     bet["status"] = "won" if won else "lost"
     if won:
@@ -487,6 +430,7 @@ def resolve_bet(bet_id):
         bet["pnl"] = -bet["amount"]
         set_state_value("lost", get_state_value("lost", 0) + 1)
     save_bet(bet)
+
 def auto_bet_loop():
     import time
     while True:
@@ -494,10 +438,12 @@ def auto_bet_loop():
         try:
             with app.test_request_context():
                 bot_bet()
-        except: pass
+        except:
+            pass
 
 auto_thread = threading.Thread(target=auto_bet_loop, daemon=True)
 auto_thread.start()
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
