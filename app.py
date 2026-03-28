@@ -429,7 +429,7 @@ def bot_bet():
             reasoning = claude_result.get("reasoning", "")
             confidence_score = claude_result.get("confidence", 5)
             edge = abs(ai_prob - market_prob)
-            if edge < 0.05 or confidence_score < 4:
+            if edge < 0.05 or confidence_score < 3:
                 return jsonify({"message": "Claude: sin ventaja suficiente en este mercado", "reasoning": reasoning})
             confidence = abs(claude_result["prob"] - round(market_prob*100))
             if confidence > 20 and confidence_score >= 7:
