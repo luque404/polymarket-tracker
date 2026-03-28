@@ -1084,7 +1084,7 @@ def debug():
 def clear_open():
     try:
         conn = get_db(); cur = conn.cursor()
-        cur.execute("DELETE FROM bets")
+        cur.execute("DROP TABLE IF EXISTS bets")
         cur.execute("UPDATE state SET value='10000.0' WHERE key='balance'")
         cur.execute("UPDATE state SET value='0' WHERE key='won'")
         cur.execute("UPDATE state SET value='0' WHERE key='lost'")
