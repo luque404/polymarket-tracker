@@ -364,14 +364,14 @@ def bot_bet():
         markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
         available = []
         for m in markets:
-            try:
-                prices = m.get("outcomePrices", "")
-                if isinstance(prices, str): prices = json.loads(prices)
-                if prices:
-                    prob = float(prices[0])
-                    vol = float(m.get("volume", 0))
-if 0.2 < prob < 0.8 and vol > 100000: available.append((m, prob))
-            except: pass
+           try:
+    prices = m.get("outcomePrices", "")
+    if isinstance(prices, str): prices = json.loads(prices)
+    if prices:
+        prob = float(prices[0])
+        vol = float(m.get("volume", 0))
+        if 0.2 < prob < 0.8 and vol > 100000: available.append((m, prob))
+except: pass
         if not available:
     return jsonify({"message": "Sin oportunidades claras ahora", "reasoning": ""})
 existing_bets = get_all_bets()
