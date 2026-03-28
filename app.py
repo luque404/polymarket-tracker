@@ -399,7 +399,16 @@ def bot_bet():
                 pass
         existing_bets = get_all_bets()
         existing_questions = [b["question"] for b in existing_bets if b["status"] == "open"]
-        available = [(m, p) for m, p in available if m.get("question","")[:80] not in existing_questions]
+        existing_keywords = set()
+        for q in existing_questions:
+            for word in q.lower().split():
+                if len(word) > 5:
+                    existing_keywords.add(word)
+        def topic_overlap(question):
+            words = question.lower().split()
+            matches = sum(1 for w in words if len(w) > 5 and w in existing_keywords)
+            return matches >= 2
+        available = [(m, p) for m, p in available if m.get("question","")[:80] not in existing_questions and not topic_overlap(m.get("question",""))]
         if not available:
             return jsonify({"message": "Ya apostado en todos los mercados disponibles", "reasoning": ""})
         best_market = None
