@@ -349,9 +349,7 @@ def bot_bet():
                 if prices:
                     prob = float(prices[0])
                     vol = float(m.get("volume", 0))
-                    end_date = m.get("endDate", m.get("end_date", ""))
-end_date = m.get("endDate", m.get("end_date", ""))
-                if 0.2 < prob < 0.8 and vol > 100000:
+                    if 0.2 < prob < 0.8 and vol > 100000:
                     available.append((m, prob))
             except:
                 pass
