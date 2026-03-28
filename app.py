@@ -90,7 +90,7 @@ h1 { font-size: 20px; font-weight: 500; margin-bottom: 4px; }
 async function loadMetrics(){
   const d = await fetch("/metrics").then(r=>r.json());
   document.getElementById("balance").textContent = "$"+Math.round(d.balance);
-  const pnl = d.balance - 1000;
+  const pnl = d.balance - 10000;
   const el = document.getElementById("pnl");
   el.textContent = (pnl>=0?"+":"-")+"$"+Math.round(Math.abs(pnl));
   el.className = "metric-value "+(pnl>0?"positive":pnl<0?"negative":"");
