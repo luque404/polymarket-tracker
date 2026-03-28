@@ -369,10 +369,16 @@ def bot_bet():
                 if isinstance(prices, str): prices = json.loads(prices)
                 if prices:
                     prob = float(prices[0])
-                    if 0.2 < prob < 0.8: available.append((m, prob))
+                    vol = float(m.get("volume", 0))
+if 0.2 < prob < 0.8 and vol > 100000: available.append((m, prob))
             except: pass
         if not available:
-            return jsonify({"message": "Sin oportunidades claras ahora", "reasoning": ""})
+    return jsonify({"message": "Sin oportunidades claras ahora", "reasoning": ""})
+existing_bets = get_all_bets()
+existing_questions = [b["question"] for b in existing_bets if b["status"] == "open"]
+available = [(m, p) for m, p in available if m.get("question","")[:80] not in existing_questions]
+if not available:
+    return jsonify({"message": "Ya apostado en todos los mercados disponibles", "reasoning": ""})
         m, market_prob = random.choice(available)
         question = m.get("question","")[:80]
         claude_result, error = ask_claude(question, market_prob)
@@ -383,7 +389,14 @@ def bot_bet():
             edge = abs(ai_prob - market_prob)
             if edge < 0.05:
                 return jsonify({"message": "Claude: sin ventaja suficiente en este mercado", "reasoning": reasoning})
-            amount = min(50, round(get_state_value("balance", 10000) * 0.05))
+            confidence = abs(claude_result["prob"] - round(market_prob*100))
+if confidence > 20:
+    pct = 0.08
+elif confidence > 10:
+    pct = 0.05
+else:
+    pct = 0.03
+amount = min(200, round(get_state_value("balance", 10000) * pct))
             place_bet(question, side, amount, market_prob)
             return jsonify({"message": "Claude aposto: "+side+" con $"+str(amount)+" USDC", "reasoning": reasoning})
         else:
@@ -392,7 +405,7 @@ def bot_bet():
             if edge < 0.05:
                 return jsonify({"message": "Sin ventaja suficiente", "reasoning": ""})
             side = "SI" if ai_prob > market_prob else "NO"
-            amount = min(50, round(get_state_value("balance", 10000) * 0.05))
+            amount = min(50, round(get_state_value("balance", 10000) * 0.03))
             place_bet(question, side, amount, market_prob)
             return jsonify({"message": "Apuesta colocada: "+side+" $"+str(amount), "reasoning": "Modo aleatorio: "+str(error)})
     except Exception as e:
