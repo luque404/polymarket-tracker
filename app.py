@@ -1081,7 +1081,8 @@ def debug():
 def clear_open():
     try:
         conn = get_db(); cur = conn.cursor()
-        cur.execute("UPDATE bets SET status='lost', pnl=-amount WHERE status='open'")
+        cur.execute("DELETE FROM bets WHERE status='open'")
+        cur.execute("UPDATE state SET value='10000.0' WHERE key='balance'")
         conn.commit(); cur.close(); conn.close()
         return jsonify({"ok": True, "message": "Apuestas viejas cerradas"})
     except Exception as e:
