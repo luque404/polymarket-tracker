@@ -367,31 +367,28 @@ def bot_bet():
         available = [(m, p) for m, p in available if m.get("question","")[:80] not in existing_questions]
         if not available:
             return jsonify({"message": "Ya apostado en todos los mercados disponibles", "reasoning": ""})
-best_market = None
-best_result = None
-best_edge = 0
-
-for m_candidate, prob_candidate in available[:10]:
-    q_candidate = m_candidate.get("question","")[:80]
-    result_candidate, _ = ask_claude(q_candidate, prob_candidate)
-    if result_candidate:
-        edge_candidate = abs(result_candidate["prob"]/100 - prob_candidate)
-        if edge_candidate > best_edge:
-            best_edge = edge_candidate
-            best_market = m_candidate
-            best_result = result_candidate
-            market_prob = prob_candidate
-
-if not best_market:
-    m, market_prob = random.choice(available)
-    question = m.get("question","")[:80]
-    claude_result, error = ask_claude(question, market_prob)
-else:
-    m = best_market
-    market_prob = market_prob
-    question = best_market.get("question","")[:80]
-    claude_result = best_result
-    error = None
+        best_market = None
+        best_result = None
+        best_edge = 0
+        for m_candidate, prob_candidate in available[:10]:
+            q_candidate = m_candidate.get("question","")[:80]
+            result_candidate, _ = ask_claude(q_candidate, prob_candidate)
+            if result_candidate:
+                edge_candidate = abs(result_candidate["prob"]/100 - prob_candidate)
+                if edge_candidate > best_edge:
+                    best_edge = edge_candidate
+                    best_market = m_candidate
+                    best_result = result_candidate
+                    market_prob = prob_candidate
+        if not best_market:
+            m, market_prob = random.choice(available)
+            question = m.get("question","")[:80]
+            claude_result, error = ask_claude(question, market_prob)
+        else:
+            m = best_market
+            question = best_market.get("question","")[:80]
+            claude_result = best_result
+            error = None
         if claude_result:
             ai_prob = claude_result["prob"] / 100
             side = claude_result["side"]
