@@ -484,7 +484,7 @@ Razona paso a paso internamente, luego responde SOLO en este JSON exacto:
 # ── TAKE PROFIT / STOP LOSS MONITOR ──────────────────────────
 
 TAKE_PROFIT_THRESHOLD = 0.20   # +20% from entry → close
-STOP_LOSS_THRESHOLD   = 0.50   # -50% → close (paper only)
+STOP_LOSS_THRESHOLD   = 0.25   # -50% → close (paper only)
 
 def monitor_open_positions():
     """Checks open bets against current market price. Simulates take profit / stop loss."""
