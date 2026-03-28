@@ -316,12 +316,13 @@ def get_price_history(market_id):
     except:
         return ""
 
-def ask_claude(question, market_prob, end_date=""):
+def ask_claude(question, market_prob, end_date="", market_id=""):
     if not ANTHROPIC_API_KEY:
         return None, "Sin API key de Claude"
     try:
         news_context = get_news(question)
         wiki_context = get_wikipedia(question)
+        price_context = get_price_history(market_id)
         prompt = f"""Eres un analista experto en mercados de prediccion.
 
 Mercado: "{question}"
@@ -329,6 +330,7 @@ Probabilidad actual del mercado: {round(market_prob*100)}%
 Fecha de resolución: {end_date}
 {news_context}
 {wiki_context}
+{price_context}
 
 Analiza este mercado y responde SOLO en este formato JSON exacto, sin texto adicional:
 {{"prob": 65, "side": "SI", "reasoning": "explicacion breve en español"}}
@@ -436,7 +438,8 @@ def bot_bet():
         for m_candidate, prob_candidate in available[:10]:
             q_candidate = m_candidate.get("question","")[:80]
             end_candidate = m_candidate.get("endDate", m_candidate.get("end_date", ""))
-            result_candidate, _ = ask_claude(q_candidate, prob_candidate, end_candidate)
+            id_candidate = m_candidate.get("id", "")
+            result_candidate, _ = ask_claude(q_candidate, prob_candidate, end_candidate, id_candidate)
             if result_candidate:
                 edge_candidate = abs(result_candidate["prob"]/100 - prob_candidate)
                 if edge_candidate > best_edge:
