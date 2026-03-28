@@ -312,10 +312,10 @@ Analiza este mercado y responde SOLO en este formato JSON exacto, sin texto adic
 def manual_bet():
     idx = int(request.args.get("idx", 0))
     try:
-        r = requests.get(GAMMA_API+"/markets?closed=false&limit=10", timeout=5)
+        r = requests.get(GAMMA_API+"/markets?closed=false&limit=50", timeout=5)
         data = r.json()
         markets = data if isinstance(data, list) else data.get("markets", [])
-        markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
+        markets = [m for m in markets if m.get("active") and not m.get("closed")][:40]
         if idx >= len(markets):
             return jsonify({"ok": False})
         m = markets[idx]
@@ -336,10 +336,10 @@ def manual_bet():
 @app.route("/bot-bet", methods=["POST"])
 def bot_bet():
     try:
-        r = requests.get(GAMMA_API+"/markets?closed=false&limit=10", timeout=5)
+        r = requests.get(GAMMA_API+"/markets?closed=false&limit=50", timeout=5)
         data = r.json()
         markets = data if isinstance(data, list) else data.get("markets", [])
-        markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
+        markets = [m for m in markets if m.get("active") and not m.get("closed")][:40]
         available = []
         for m in markets:
             try:
