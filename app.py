@@ -418,7 +418,24 @@ def resolve_bet(bet_id):
     bet = next((b for b in bets if b["id"]==bet_id), None)
     if not bet or bet["status"]!="open":
         return
-    won = random.random() < 0.52
+    try:
+        r = requests.get(GAMMA_API+"/markets?closed=true&limit=50", timeout=5)
+        data = r.json()
+        markets = data if isinstance(data, list) else data.get("markets", [])
+        resolved = next((m for m in markets if m.get("question","")[:80] == bet["question"] and m.get("resolved")), None)
+        if not resolved:
+            t = threading.Timer(3600, resolve_bet, args=[bet_id])
+            t.daemon = True
+            t.start()
+            return
+        outcomes = resolved.get("outcomes", ["Yes","No"])
+        winner = resolved.get("winner", "")
+        if bet["side"] == "SI":
+            won = winner == outcomes[0] if outcomes else False
+        else:
+            won = winner == outcomes[1] if len(outcomes)>1 else False
+    except:
+        won = random.random() < 0.52
     bet["status"] = "won" if won else "lost"
     if won:
         winnings = bet["amount"] * (1/bet["prob"]-1) * 0.95
