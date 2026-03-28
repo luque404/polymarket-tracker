@@ -266,6 +266,36 @@ def get_news(question):
         return "Noticias recientes: " + " | ".join(headlines)
     except:
         return ""
+def get_wikipedia(question):
+    try:
+        words = question.split()[:4]
+        query = " ".join(words)
+        r = requests.get(
+            "https://en.wikipedia.org/api/rest_v1/page/summary/"+query.replace(" ","_"),
+            timeout=5
+        )
+        if r.status_code == 200:
+            data = r.json()
+            extract = data.get("extract","")
+            return "Wikipedia: "+extract[:500] if extract else ""
+        r2 = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={"action":"query","list":"search","srsearch":query,"format":"json","srlimit":1},
+            timeout=5
+        )
+        results = r2.json().get("query",{}).get("search",[])
+        if results:
+            title = results[0]["title"]
+            r3 = requests.get(
+                "https://en.wikipedia.org/api/rest_v1/page/summary/"+title.replace(" ","_"),
+                timeout=5
+            )
+            if r3.status_code == 200:
+                extract = r3.json().get("extract","")
+                return "Wikipedia: "+extract[:500] if extract else ""
+        return ""
+    except:
+        return ""
 
 def ask_claude(question, market_prob):
     if not ANTHROPIC_API_KEY:
