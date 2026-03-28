@@ -229,7 +229,7 @@ def get_markets():
         r = requests.get(GAMMA_API+"/markets?closed=false&limit=10", timeout=5)
         data = r.json()
         markets = data if isinstance(data, list) else data.get("markets", [])
-        markets = [m for m in markets if m.get("active") and not m.get("closed")][:6]
+        markets = [m for m in markets if m.get("active") and not m.get("closed")][:20]
         result = []
         for m in markets:
             prob = 50
