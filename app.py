@@ -400,11 +400,13 @@ def bot_bet():
 
 @app.route("/bets")
 def get_bets():
+    bets = get_all_bets()[:10]
     result = []
-    for b in state["bets"][:10]:
-        pnl_text = "—" if b["status"]=="open" else (("+" if b["pnl"]>0 else "")+str(round(b["pnl"]))+" USDC")
+    for b in bets:
+        pnl = b["pnl"] or 0
+        pnl_text = "—" if b["status"]=="open" else (("+" if pnl>0 else "")+str(round(pnl))+" USDC")
         status_map = {"open":"abierta","won":"ganada","lost":"perdida"}
-        result.append({"question":b["question"],"side":b["side"],"amount":b["amount"],"pnl":b["pnl"],"status":b["status"],"pnl_text":pnl_text,"status_text":status_map.get(b["status"],"")})
+        result.append({"question":b["question"],"side":b["side"],"amount":b["amount"],"pnl":pnl,"status":b["status"],"pnl_text":pnl_text,"status_text":status_map.get(b["status"],"")})
     return jsonify(result)
 
 def place_bet(question, side, amount, prob):
