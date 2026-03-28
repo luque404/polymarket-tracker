@@ -1048,6 +1048,15 @@ setInterval(()=>{loadMetrics();loadBets();}, 10000);
 </body>
 </html>"""
 
+@app.route("/clear-open", methods=["POST"])
+def clear_open():
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("UPDATE bets SET status='lost', pnl=-amount WHERE status='open'")
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"ok": True, "message": "Apuestas viejas cerradas"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 @app.route("/")
 def index():
     return render_template_string(HTML)
