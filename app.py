@@ -339,7 +339,8 @@ def bot_bet():
         r = requests.get(GAMMA_API+"/markets?closed=false&limit=50", timeout=5)
         data = r.json()
         markets = data if isinstance(data, list) else data.get("markets", [])
-        markets = [m for m in markets if m.get("active") and not m.get("closed")][:40]
+        EXCLUDED = ["soccer", "football", "nfl", "nba", "nhl", "mlb", "sports", "basketball", "tennis", "golf", "cricket", "rugby", "f1", "racing", "olympics"]
+        markets = [m for m in markets if m.get("active") and not m.get("closed") and not any(x in (m.get("question","") + " ".join([t.get("slug","") for t in m.get("tags",[])])).lower() for x in EXCLUDED)][:40]
         available = []
         for m in markets:
             try:
