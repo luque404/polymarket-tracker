@@ -383,7 +383,7 @@ def bot_bet():
             edge = abs(ai_prob - market_prob)
             if edge < 0.05:
                 return jsonify({"message": "Claude: sin ventaja suficiente en este mercado", "reasoning": reasoning})
-            amount = min(50, round(state["balance"] * 0.05))
+            amount = min(50, round(get_state_value("balance", 10000) * 0.05))
             place_bet(question, side, amount, market_prob)
             return jsonify({"message": "Claude aposto: "+side+" con $"+str(amount)+" USDC", "reasoning": reasoning})
         else:
@@ -392,7 +392,7 @@ def bot_bet():
             if edge < 0.05:
                 return jsonify({"message": "Sin ventaja suficiente", "reasoning": ""})
             side = "SI" if ai_prob > market_prob else "NO"
-            amount = min(50, round(state["balance"] * 0.05))
+            amount = min(50, round(get_state_value("balance", 10000) * 0.05))
             place_bet(question, side, amount, market_prob)
             return jsonify({"message": "Apuesta colocada: "+side+" $"+str(amount), "reasoning": "Modo aleatorio: "+str(error)})
     except Exception as e:
