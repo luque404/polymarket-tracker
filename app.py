@@ -296,6 +296,25 @@ def get_wikipedia(question):
         return ""
     except:
         return ""
+def get_price_history(market_id):
+    try:
+        r = requests.get(
+            f"https://clob.polymarket.com/prices-history?market={market_id}&interval=1d&fidelity=1",
+            timeout=5
+        )
+        data = r.json()
+        history = data.get("history", [])
+        if len(history) < 2:
+            return ""
+        current = history[-1]["p"]
+        day_ago = history[-2]["p"] if len(history) >= 2 else current
+        week_ago = history[-7]["p"] if len(history) >= 7 else history[0]["p"]
+        change_24h = round((current - day_ago) * 100, 1)
+        change_7d = round((current - week_ago) * 100, 1)
+        direction = "subiendo" if change_24h > 0 else "bajando"
+        return f"Movimiento de precio: {direction} {abs(change_24h)}% en 24h, {abs(change_7d)}% en 7 días"
+    except:
+        return ""
 
 def ask_claude(question, market_prob, end_date=""):
     if not ANTHROPIC_API_KEY:
