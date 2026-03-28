@@ -297,7 +297,7 @@ def get_wikipedia(question):
     except:
         return ""
 
-def ask_claude(question, market_prob):
+def ask_claude(question, market_prob, end_date=""):
     if not ANTHROPIC_API_KEY:
         return None, "Sin API key de Claude"
     try:
@@ -307,6 +307,7 @@ def ask_claude(question, market_prob):
 
 Mercado: "{question}"
 Probabilidad actual del mercado: {round(market_prob*100)}%
+Fecha de resolución: {end_date}
 {news_context}
 {wiki_context}
 
@@ -406,7 +407,8 @@ def bot_bet():
         best_edge = 0
         for m_candidate, prob_candidate in available[:10]:
             q_candidate = m_candidate.get("question","")[:80]
-            result_candidate, _ = ask_claude(q_candidate, prob_candidate)
+            end_candidate = m_candidate.get("endDate", m_candidate.get("end_date", ""))
+            result_candidate, _ = ask_claude(q_candidate, prob_candidate, end_candidate)
             if result_candidate:
                 edge_candidate = abs(result_candidate["prob"]/100 - prob_candidate)
                 if edge_candidate > best_edge:
