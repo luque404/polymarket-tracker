@@ -115,7 +115,7 @@ def set_state(key, value):
 def get_all_bets():
     try:
         conn = get_db(); cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT * FROM bets ORDER BY created_at DESC")
+        cur.execute("SELECT * FROM bets ORDER BY id DESC")
         rows = cur.fetchall(); cur.close(); conn.close()
         return [dict(r) for r in rows]
     except: return []
