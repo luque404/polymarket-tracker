@@ -1049,6 +1049,34 @@ setInterval(()=>{loadMetrics();loadBets();}, 10000);
 </body>
 </html>"""
 
+@app.route("/debug")
+def debug():
+    try:
+        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=100", timeout=8)
+        data = r.json()
+        markets = data if isinstance(data, list) else data.get("markets",[])
+        total = len(markets)
+        active = [m for m in markets if m.get("active") and not m.get("closed")]
+        no_sports = [m for m in active if not any(x in m.get("question","").lower() for x in SPORTS_FILTER)]
+        in_range = []
+        for m in no_sports:
+            try:
+                prices = m.get("outcomePrices","")
+                if isinstance(prices, str): prices = json.loads(prices)
+                prob = float(prices[0])
+                vol = float(m.get("volume",0))
+                if 0.20 < prob < 0.80 and vol > 10000:
+                    in_range.append(m.get("question","")[:60])
+            except: continue
+        return jsonify({
+            "total": total,
+            "active": len(active),
+            "no_sports": len(no_sports),
+            "pass_filters": len(in_range),
+            "examples": in_range[:5]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 @app.route("/clear-open", methods=["POST"])
 def clear_open():
     try:
