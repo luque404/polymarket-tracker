@@ -668,8 +668,10 @@ def bot_bet():
                 end_date = m.get("endDate", m.get("end_date",""))
                 if end_date:
                     end = datetime.fromisoformat(end_date.replace("Z","+00:00"))
-                    if (end - now_utc).days > 365 or (end - now_utc).days < 1:
+                    days_left = (end - now_utc).days
+                    if days_left > 365 or days_left < 1:
                         continue
+                    m['days_left'] = days_left
                 available.append((m, prob))
             except:
                 continue
@@ -696,6 +698,7 @@ def bot_bet():
             return jsonify({"message": "Sin mercados nuevos disponibles", "reasoning": ""})
 
         # 4. Haiku filter → top 5
+        available.sort(key=lambda x: x[0].get('days_left', 365))
         top5 = haiku_filter(available)
 
         # 5. Sonnet deep analysis on each → pick best edge
