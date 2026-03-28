@@ -348,7 +348,7 @@ def manual_bet():
         r = requests.get(GAMMA_API+"/markets?closed=false&limit=50", timeout=5)
         data = r.json()
         markets = data if isinstance(data, list) else data.get("markets", [])
-        markets = [m for m in markets if m.get("active") and not m.get("closed")][:40]
+        markets = [m for m in markets if m.get("active") and not m.get("closed")][:80]
         if idx >= len(markets):
             return jsonify({"ok": False})
         m = markets[idx]
@@ -369,11 +369,11 @@ def manual_bet():
 @app.route("/bot-bet", methods=["POST"])
 def bot_bet():
     try:
-        r = requests.get(GAMMA_API+"/markets?closed=false&limit=50", timeout=5)
+        r = requests.get(GAMMA_API+"/markets?closed=false&limit=100", timeout=5)
         data = r.json()
         markets = data if isinstance(data, list) else data.get("markets", [])
         EXCLUDED = ["soccer", "football", "nfl", "nba", "nhl", "mlb", "sports", "basketball", "tennis", "golf", "cricket", "rugby", "f1", "racing", "olympics", "qualify", "world cup", "fifa", "champion", "league", "playoff"]
-        markets = [m for m in markets if m.get("active") and not m.get("closed") and not any(x in (m.get("question","") + " ".join([t.get("slug","") for t in m.get("tags",[])])).lower() for x in EXCLUDED)][:40]
+        markets = [m for m in markets if m.get("active") and not m.get("closed") and not any(x in (m.get("question","") + " ".join([t.get("slug","") for t in m.get("tags",[])])).lower() for x in EXCLUDED)][:80]
         available = []
         for m in markets:
             try:
