@@ -45,6 +45,7 @@ def init_db():
     try:
         conn = get_db()
         cur  = conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS bets")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS bets (
                 id               TEXT PRIMARY KEY,
