@@ -302,38 +302,6 @@ def detect_easy_markets(question, market_prob, end_date):
     
     return " | ".join(hints) if hints else ""
    
-def get_wikipedia_date(question):
-    """Busca fechas clave relacionadas al mercado."""
-    try:
-        words = [w for w in question.split() if len(w) > 4 and w.isalpha()][:4]
-        query = " ".join(words)
-        r = requests.get(
-            "https://en.wikipedia.org/api/rest_v1/page/summary/" + query.replace(" ","_"),
-            timeout=5
-        )
-        if r.status_code == 200:
-            extract = r.json().get("extract","")[:300]
-            if extract:
-                return f"Wikipedia: {extract}"
-        r2 = requests.get(
-            "https://en.wikipedia.org/w/api.php",
-            params={"action":"query","list":"search","srsearch":query,
-                    "format":"json","srlimit":1},
-            timeout=5
-        )
-        results = r2.json().get("query",{}).get("search",[])
-        if results:
-            title = results[0]["title"]
-            r3 = requests.get(
-                "https://en.wikipedia.org/api/rest_v1/page/summary/"+title.replace(" ","_"),
-                timeout=5
-            )
-            if r3.status_code == 200:
-                extract = r3.json().get("extract","")[:300]
-                return f"Wikipedia: {extract}" if extract else ""
-        return ""
-    except:
-        return ""
 def aggregate_signals(question, market_id, market_prob):
     """Combines all signals into a unified context string."""
     signals = []
@@ -362,9 +330,6 @@ def aggregate_signals(question, market_id, market_prob):
     ob_text, imbalance = get_orderbook_signal(market_id)
     if ob_text:
         signals.append(ob_text); source_list.append("Orderbook")
-wiki_text = get_wikipedia_date(question)
-if wiki_text:
-    signals.append(wiki_text); source_list.append("Wikipedia")
 
 easy_hint = detect_easy_markets(question, market_prob, "")
 if easy_hint:
