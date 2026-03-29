@@ -34,7 +34,7 @@ SPORTS_FILTER = [
     "premier league", "bundesliga", "ligue 1", "la liga",
     "ucl", "ufc", "boxing", "wrestling", "nascar",
     "formula 1", "grand prix", "playoff", "serie a",
-    "nfl draft", "nba draft"
+    "nfl draft", "nba draft", "nfl draft", "nba draft", "champions league", "europa league", "champions"
 ]
 
 # ── DB ───────────────────────────────────────────────────────
@@ -796,6 +796,13 @@ def bot_bet():
         if edge < 0.08 or confidence < 4:
             return jsonify({
                 "message": f"Claude: edge {round(edge*100,1)}pp insuficiente (mín 8pp) o confianza baja ({confidence}/10)",
+                "reasoning": reasoning
+            })
+            
+        sources = best_result.get("sources_used", "")
+        if not sources and confidence < 7:
+            return jsonify({
+                "message": f"Claude: sin fuentes y confianza {confidence}/10 — apuesta cancelada",
                 "reasoning": reasoning
             })
 
