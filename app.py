@@ -1251,8 +1251,22 @@ def test_metaculus():
 
 @app.route("/test-gdelt")
 def test_gdelt():
-    text, score = get_gdelt_signal("Will Viktor Orban be Prime Minister of Hungary")
-    return jsonify({"text": text, "score": score})
+    try:
+        r = requests.get(
+            "https://api.gdeltproject.org/api/v2/doc/doc",
+            params={
+                "query": "Orban Hungary",
+                "mode": "artlist",
+                "maxrecords": 5,
+                "format": "json",
+                "timespan": "30d",
+                "sourcelang": "english"
+            },
+            timeout=8
+        )
+        return jsonify({"status": r.status_code, "raw": r.text[:500]})
+    except Exception as e:
+        return jsonify({"error": str(e)})
     
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
