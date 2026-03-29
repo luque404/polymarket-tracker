@@ -470,6 +470,18 @@ def sonnet_analyze(question, market_prob, end_date, market_id, signals_text, met
     try:
         perf_ctx = get_performance_context()
         meta_hint = f"\nPredicción de Metaculus (forecasters expertos): {round(meta_pred*100)}%" if meta_pred else ""
+
+        # Buscar mercados relacionados para detectar inconsistencias
+        all_bets = get_all_bets()
+        open_bets = [b for b in all_bets if b["status"]=="open"]
+        related = []
+        q_words = set(w.lower() for w in question.split() if len(w) > 4)
+        for b in open_bets:
+            b_words = set(w.lower() for w in b["question"].split() if len(w) > 4)
+            if len(q_words & b_words) >= 2:
+                related.append(f'"{b["question"][:50]}" → apostamos {b["side"]} al {round(b.get("prob_market",0.5)*100)}%')
+        if related:
+            meta_hint += f"\nMercados relacionados ya apostados: {'; '.join(related[:2])}"
         prompt = f"""Eres un analista elite de mercados de predicción con track record probado.
 
 === CONTEXTO DE RENDIMIENTO ===
