@@ -153,13 +153,26 @@ def get_news_signal(question):
     try:
         words = [w for w in question.split() if len(w) > 4][:5]
         query = " ".join(words[:3])
+        from datetime import datetime, timedelta
+        date_from = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
         r = requests.get(
             "https://newsapi.org/v2/everything",
             params={"q": query, "pageSize": 5, "sortBy": "publishedAt",
-                    "language": "en", "apiKey": NEWS_API_KEY},
+                    "language": "en", "from": date_from, "apiKey": NEWS_API_KEY},
             timeout=6
         )
-        articles = r.json().get("articles", [])
+        data = r.json()
+        articles = data.get("articles", [])
+        if not articles:
+            # Intentar con query más simple
+            query_simple = words[0] if words else query
+            r2 = requests.get(
+                "https://newsapi.org/v2/everything",
+                params={"q": query_simple, "pageSize": 5, "sortBy": "publishedAt",
+                        "language": "en", "from": date_from, "apiKey": NEWS_API_KEY},
+                timeout=6
+            )
+            articles = r2.json().get("articles", [])
         if not articles:
             return "", 0.0
         headlines = [a["title"] for a in articles[:5] if a.get("title")]
