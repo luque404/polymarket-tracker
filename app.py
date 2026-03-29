@@ -741,7 +741,7 @@ def bot_bet():
                      if m.get("question","")[:80] not in existing_questions
                      and not topic_overlap(m.get("question",""))]
         open_count = len([b for b in get_all_bets() if b["status"]=="open"])
-        if open_count >= 15:
+        if open_count >= 25:
             return jsonify({"message": f"Máximo 15 apuestas abiertas ({open_count} activas)", "reasoning": ""})
         if not available:
             return jsonify({"message": "Sin mercados nuevos disponibles", "reasoning": ""})
