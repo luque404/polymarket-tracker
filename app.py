@@ -28,11 +28,13 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
 
 SPORTS_FILTER = [
-    "soccer","football","nfl","nba","nhl","mlb","sports","basketball",
-    "tennis","golf","cricket","rugby","f1","racing","olympics","qualify",
-    "world cup","fifa","champion","league","playoff","serie a","premier",
-    "bundesliga","ligue","laliga","ucl","ufc","boxing","wrestling","nascar",
-    "formula","grand prix","match","tournament","game","season","draft"
+    "soccer", "football", "nfl", "nba", "nhl", "mlb",
+    "basketball", "tennis", "golf", "cricket", "rugby",
+    "f1 race", "racing", "olympics", "world cup", "fifa",
+    "premier league", "bundesliga", "ligue 1", "la liga",
+    "ucl", "ufc", "boxing", "wrestling", "nascar",
+    "formula 1", "grand prix", "playoff", "serie a",
+    "nfl draft", "nba draft"
 ]
 
 # ── DB ───────────────────────────────────────────────────────
@@ -1148,7 +1150,7 @@ def debug():
                 if isinstance(prices, str): prices = json.loads(prices)
                 prob = float(prices[0])
                 vol = float(m.get("volume",0))
-                if 0.20 < prob < 0.80 and vol > 10000:
+                if 0.20 < prob < 0.80 and vol > 100:
                     in_range.append(m.get("question","")[:60])
             except: continue
         return jsonify({
