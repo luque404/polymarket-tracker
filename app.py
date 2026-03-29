@@ -331,10 +331,10 @@ def aggregate_signals(question, market_id, market_prob):
     if ob_text:
         signals.append(ob_text); source_list.append("Orderbook")
 
-easy_hint = detect_easy_markets(question, market_prob, "")
-if easy_hint:
-    signals.insert(0, f"⚡ PATRÓN DETECTADO: {easy_hint}")
-return "\n".join(signals), ", ".join(source_list) or "ninguna", meta_pred
+    easy_hint = detect_easy_markets(question, market_prob, "")
+    if easy_hint:
+        signals.insert(0, f"⚡ PATRÓN DETECTADO: {easy_hint}")
+    return "\n".join(signals), ", ".join(source_list) or "ninguna", meta_pred
 
 # ── PERFORMANCE CONTEXT FOR CLAUDE ───────────────────────────
 
