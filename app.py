@@ -813,7 +813,7 @@ def bot_bet():
             })
             
         sources = best_result.get("sources_used", "")
-        if not sources and confidence < 7:
+        if not sources and confidence < 6:
             return jsonify({
                 "message": f"Claude: sin fuentes y confianza {confidence}/10 — apuesta cancelada",
                 "reasoning": reasoning
