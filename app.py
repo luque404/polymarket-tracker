@@ -184,20 +184,25 @@ def get_news_signal(question):
 
 def get_metaculus_signal(question):
     """Busca en Metaculus el mismo tema y retorna probabilidad de expertos"""
+    if not METACULUS_API_KEY:
+        return "", 0.0
     try:
         words = [w for w in question.split() if len(w) > 4][:4]
         query = " ".join(words[:3])
         r = requests.get(
-            "https://www.metaculus.com/api/questions/",
-            params={"search": query, "status": "open", "limit": 5, "forecast_type": "binary"},
-            headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+            "https://www.metaculus.com/api2/questions/",
+            params={"search": query, "status": "open", "limit": 5},
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Token {METACULUS_API_KEY}"
+            },
             timeout=8
         )
         results = r.json().get("results", [])
         if not results:
             return "", 0.0
         best = results[0]
-        prob = best.get("aggregations", {}).get("recency_weighted", {}).get("latest", {}).get("centers", [None])[0]
+        prob = best.get("community_prediction", {}).get("full", {}).get("q2")
         title = best.get("title", "")
         if prob is None:
             return "", 0.0
