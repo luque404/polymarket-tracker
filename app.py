@@ -1223,6 +1223,11 @@ def clear_open():
 def index():
     return render_template_string(HTML)
 
+@app.route("/test-metaculus")
+def test_metaculus():
+    text, prob = get_metaculus_signal("Will Viktor Orban be Prime Minister of Hungary")
+    return jsonify({"text": text, "prob": prob})
+    
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
