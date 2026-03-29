@@ -181,6 +181,31 @@ def get_news_signal(question):
     except:
         return "", 0.0
 
+def get_metaculus_signal(question):
+    """Busca en Metaculus el mismo tema y retorna probabilidad de expertos"""
+    try:
+        words = [w for w in question.split() if len(w) > 4][:4]
+        query = " ".join(words[:3])
+        r = requests.get(
+            "https://www.metaculus.com/api2/questions/",
+            params={"search": query, "status": "open", "limit": 5},
+            headers={"Accept": "application/json"},
+            timeout=8
+        )
+        results = r.json().get("results", [])
+        if not results:
+            return "", 0.0
+        # Tomar la pregunta más relevante
+        best = results[0]
+        community_prediction = best.get("community_prediction", {})
+        prob = community_prediction.get("full", {}).get("q2")  # mediana
+        title = best.get("title", "")
+        if prob is None:
+            return "", 0.0
+        return f"Metaculus: '{title[:50]}' → {round(prob*100)}% prob expertos", prob
+    except:
+        return "", 0.0
+
 def get_reddit_sentiment(question):
     """Searches Reddit for relevant posts, returns sentiment summary."""
     try:
