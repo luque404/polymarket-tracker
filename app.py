@@ -187,18 +187,16 @@ def get_metaculus_signal(question):
         words = [w for w in question.split() if len(w) > 4][:4]
         query = " ".join(words[:3])
         r = requests.get(
-            "https://www.metaculus.com/api2/questions/",
-            params={"search": query, "status": "open", "limit": 5},
-            headers={"Accept": "application/json"},
+            "https://www.metaculus.com/api/questions/",
+            params={"search": query, "status": "open", "limit": 5, "forecast_type": "binary"},
+            headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
             timeout=8
         )
         results = r.json().get("results", [])
         if not results:
             return "", 0.0
-        # Tomar la pregunta más relevante
         best = results[0]
-        community_prediction = best.get("community_prediction", {})
-        prob = community_prediction.get("full", {}).get("q2")  # mediana
+        prob = best.get("aggregations", {}).get("recency_weighted", {}).get("latest", {}).get("centers", [None])[0]
         title = best.get("title", "")
         if prob is None:
             return "", 0.0
@@ -228,30 +226,6 @@ def get_reddit_sentiment(question):
         return text, min(1.0, len(posts) / 10.0)
     except:
         return "", 0.0
-
-def get_metaculus_signal(question):
-    """Tries to find a matching Metaculus question for cross-validation."""
-    try:
-        words = [w for w in question.split() if len(w) > 4][:3]
-        query = " ".join(words)
-        r = requests.get(
-            "https://www.metaculus.com/api2/questions/",
-            params={"search": query, "status": "open", "limit": 3},
-            timeout=6
-        )
-        results = r.json().get("results", [])
-        if not results:
-            return "", None
-        q = results[0]
-        community_pred = q.get("community_prediction", {})
-        pred_val = community_pred.get("full", {}).get("q2")
-        if pred_val is None:
-            return "", None
-        title = q.get("title","")[:60]
-        text = f"Metaculus forecasters estiman {round(pred_val*100)}% para: {title}"
-        return text, pred_val
-    except:
-        return "", None
 
 def get_price_history_signal(market_id):
     """Returns price momentum signal."""
