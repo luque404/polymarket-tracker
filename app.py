@@ -1052,6 +1052,39 @@ setInterval(()=>{loadMetrics();loadBets();}, 10000);
 </body>
 </html>"""
 
+@app.route("/setup-db")
+def setup_db():
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS bets")
+        cur.execute("""
+            CREATE TABLE bets (
+                id TEXT PRIMARY KEY,
+                question TEXT,
+                market_id TEXT,
+                side TEXT,
+                amount REAL,
+                prob_market REAL,
+                prob_claude REAL,
+                edge REAL,
+                confidence INTEGER,
+                kelly_f REAL,
+                status TEXT DEFAULT 'open',
+                pnl REAL DEFAULT 0,
+                reasoning TEXT,
+                sources_used TEXT,
+                price_entry REAL,
+                price_current REAL,
+                take_profit_hit BOOLEAN DEFAULT FALSE,
+                stop_loss_hit BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                resolved_at TIMESTAMPTZ
+            )
+        """)
+        conn.commit(); cur.close(); conn.close()
+        return "Tabla creada OK"
+    except Exception as e:
+        return f"Error: {e}"
 @app.route("/debug")
 def debug():
     try:
