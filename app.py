@@ -708,9 +708,9 @@ def bot_bet():
                     continue
                 prob = float(prices[0])
                 vol  = float(m.get("volume", 0))
-                if not (0.20 < prob < 0.80):
+                if not (0.15 < prob < 0.85):
                     continue
-                if vol < 2000:
+                if vol < 500:
                     continue
                 end_date = m.get("endDate", m.get("end_date",""))
                 if end_date:
