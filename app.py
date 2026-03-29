@@ -1248,6 +1248,11 @@ def test_metaculus():
         return jsonify({"status": r.status_code, "raw": r.json()})
     except Exception as e:
         return jsonify({"error": str(e)})
+
+@app.route("/test-gdelt")
+def test_gdelt():
+    text, score = get_gdelt_signal("Will Viktor Orban be Prime Minister of Hungary")
+    return jsonify({"text": text, "score": score})
     
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
