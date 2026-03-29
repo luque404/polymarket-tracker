@@ -1205,8 +1205,8 @@ def index():
 
 @app.route("/test-metaculus")
 def test_metaculus():
-    import os
-    return jsonify({"all_keys": list(os.environ.keys())})
+    text, prob = get_metaculus_signal("Will Viktor Orban be Prime Minister of Hungary")
+    return jsonify({"text": text, "prob": prob})
     
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
