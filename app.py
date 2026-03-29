@@ -183,30 +183,29 @@ def get_news_signal(question):
         return "", 0.0
 
 def get_metaculus_signal(question):
-    """Busca en Metaculus el mismo tema y retorna probabilidad de expertos"""
+    """Busca en Metaculus y retorna probabilidad de expertos"""
     if not METACULUS_API_KEY:
         return "", 0.0
     try:
-        words = [w for w in question.split() if len(w) > 4][:4]
-        query = " ".join(words[:3])
+        words = [w for w in question.split() if len(w) > 4][:3]
+        query = " ".join(words)
         r = requests.get(
             "https://www.metaculus.com/api2/questions/",
-            params={"search": query, "status": "open", "limit": 5},
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Token {METACULUS_API_KEY}"
-            },
+            params={"search": query, "status": "open", "limit": 5, "has_forecasts": "true"},
+            headers={"Accept": "application/json", "Authorization": f"Token {METACULUS_API_KEY}"},
             timeout=8
         )
         results = r.json().get("results", [])
-        if not results:
-            return "", 0.0
-        best = results[0]
-        prob = best.get("community_prediction", {}).get("full", {}).get("q2")
-        title = best.get("title", "")
-        if prob is None:
-            return "", 0.0
-        return f"Metaculus: '{title[:50]}' → {round(prob*100)}% prob expertos", prob
+        for item in results:
+            q = item.get("question", {})
+            prob = q.get("aggregations", {}).get("recency_weighted", {}).get("latest", {})
+            if prob and isinstance(prob, dict):
+                centers = prob.get("centers")
+                if centers and len(centers) > 0:
+                    p = centers[0]
+                    title = item.get("title", "")[:50]
+                    return f"Metaculus: '{title}' → {round(p*100)}% expertos", p
+        return "", 0.0
     except:
         return "", 0.0
 
