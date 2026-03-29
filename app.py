@@ -237,7 +237,6 @@ def get_price_history_signal(market_id):
         return "", 0.0, None
 
 def get_orderbook_signal(market_id):
-    """Gets real orderbook depth from CLOB for liquidity signal."""
     try:
         r = requests.get(f"{CLOB_API}/book?token_id={market_id}", timeout=5)
         data = r.json()
@@ -245,19 +244,95 @@ def get_orderbook_signal(market_id):
         asks = data.get("asks", [])
         if not bids or not asks:
             return "", 0.0
-        best_bid  = float(bids[0]["price"])  if bids else 0
-        best_ask  = float(asks[0]["price"])  if asks else 1
-        spread    = round((best_ask - best_bid) * 100, 2)
+        best_bid = float(bids[0]["price"]) if bids else 0
+        best_ask = float(asks[0]["price"]) if asks else 1
+        spread = round((best_ask - best_bid) * 100, 2)
         bid_depth = sum(float(b["size"]) for b in bids[:5])
         ask_depth = sum(float(a["size"]) for a in asks[:5])
-        imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth + 1)
+        total_depth = bid_depth + ask_depth
+        imbalance = (bid_depth - ask_depth) / (total_depth + 1)
+        
+        # Detectar smart money — apuesta grande en un lado
+        max_single_bid = max((float(b["size"]) for b in bids[:3]), default=0)
+        max_single_ask = max((float(a["size"]) for a in asks[:3]), default=0)
+        
+        smart_money = ""
+        if max_single_bid > 5000:
+            smart_money = f"⚡ SMART MONEY: apuesta grande de ${round(max_single_bid)} en SI"
+        elif max_single_ask > 5000:
+            smart_money = f"⚡ SMART MONEY: apuesta grande de ${round(max_single_ask)} en NO"
+        
         text = (f"Orderbook: spread {spread}%, "
                 f"{'presión compradora' if imbalance > 0.1 else 'presión vendedora' if imbalance < -0.1 else 'equilibrado'} "
                 f"(imbalance {round(imbalance*100)}%)")
+        if smart_money:
+            text += f" | {smart_money}"
         return text, imbalance
     except:
         return "", 0.0
-
+        
+def detect_easy_markets(question, market_prob, end_date):
+    """Detecta patrones de mercados fáciles de ganar."""
+    q = question.lower()
+    hints = []
+    
+    # Patron 1: fecha limite absurda
+    absurd_anchors = ["before gta vi", "before gta6", "before world war 3", 
+                      "before alien", "before asteroid"]
+    if any(a in q for a in absurd_anchors):
+        hints.append("FECHA LÍMITE ABSURDA — mercado probablemente mal calibrado")
+    
+    # Patron 2: evento religioso o imposible
+    impossible = ["second coming", "jesus", "rapture", "alien invasion", 
+                  "zombie", "apocalypse", "flat earth"]
+    if any(i in q for i in impossible):
+        hints.append("EVENTO IMPOSIBLE — probabilidad real cercana a 0%")
+    
+    # Patron 3: celebridad sin actividad
+    inactive_celebs = ["rihanna", "frank ocean", "tool album", "winds of winter",
+                       "half life 3", "kanye"]
+    if any(c in q for c in inactive_celebs):
+        hints.append("ARTISTA/PROYECTO INACTIVO — históricamente no cumple")
+    
+    # Patron 4: probabilidad extrema mal calibrada
+    if market_prob > 0.65:
+        hints.append(f"SOBREESTIMADO — mercado en {round(market_prob*100)}% puede ser demasiado optimista")
+    elif market_prob < 0.35:
+        hints.append(f"SUBESTIMADO — mercado en {round(market_prob*100)}% puede ser demasiado pesimista")
+    
+    return " | ".join(hints) if hints else ""
+    def get_wikipedia_date(question):
+    """Busca fechas clave relacionadas al mercado."""
+    try:
+        words = [w for w in question.split() if len(w) > 4 and w.isalpha()][:4]
+        query = " ".join(words)
+        r = requests.get(
+            "https://en.wikipedia.org/api/rest_v1/page/summary/" + query.replace(" ","_"),
+            timeout=5
+        )
+        if r.status_code == 200:
+            extract = r.json().get("extract","")[:300]
+            if extract:
+                return f"Wikipedia: {extract}"
+        r2 = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={"action":"query","list":"search","srsearch":query,
+                    "format":"json","srlimit":1},
+            timeout=5
+        )
+        results = r2.json().get("query",{}).get("search",[])
+        if results:
+            title = results[0]["title"]
+            r3 = requests.get(
+                "https://en.wikipedia.org/api/rest_v1/page/summary/"+title.replace(" ","_"),
+                timeout=5
+            )
+            if r3.status_code == 200:
+                extract = r3.json().get("extract","")[:300]
+                return f"Wikipedia: {extract}" if extract else ""
+        return ""
+    except:
+        return ""
 def aggregate_signals(question, market_id, market_prob):
     """Combines all signals into a unified context string."""
     signals = []
@@ -286,22 +361,41 @@ def aggregate_signals(question, market_id, market_prob):
     ob_text, imbalance = get_orderbook_signal(market_id)
     if ob_text:
         signals.append(ob_text); source_list.append("Orderbook")
+wiki_text = get_wikipedia_date(question)
+if wiki_text:
+    signals.append(wiki_text); source_list.append("Wikipedia")
 
-    return "\n".join(signals), ", ".join(source_list) or "ninguna", meta_pred
+easy_hint = detect_easy_markets(question, market_prob, "")
+if easy_hint:
+    signals.insert(0, f"⚡ PATRÓN DETECTADO: {easy_hint}")
+return "\n".join(signals), ", ".join(source_list) or "ninguna", meta_pred
 
 # ── PERFORMANCE CONTEXT FOR CLAUDE ───────────────────────────
 
 def get_performance_context():
-    """Builds a performance summary to feed Claude as memory."""
     bets = get_all_bets()
     resolved = [b for b in bets if b["status"] in ("won","lost")]
     if not resolved:
-        return "Sin historial de apuestas resueltas aún."
+        return """Sin historial aún. 
+SESGOS CONOCIDOS DE POLYMARKET A EXPLOTAR:
+- Mercados de eventos imposibles/improbables sobreestimados (segunda venida, aliens, etc)
+- Mercados de celebridades sin actividad reciente sobreestimados
+- Mercados donde GTA VI es la fecha límite: GTA VI tiene fecha confirmada 2025/2026
+- Probabilidades entre 40-60% suelen estar mal calibradas
+ESTRATEGIA: buscar mercados donde el precio está muy lejos de la realidad."""
 
-    won   = [b for b in resolved if b["status"] == "won"]
-    lost  = [b for b in resolved if b["status"] == "lost"]
-    wr    = round(len(won) / len(resolved) * 100, 1)
+    won = [b for b in resolved if b["status"]=="won"]
+    lost = [b for b in resolved if b["status"]=="lost"]
+    wr = round(len(won)/len(resolved)*100,1)
     total_pnl = sum(b["pnl"] for b in resolved)
+
+    recent_won = [f'"{b["question"][:40]}" ({b.get("reasoning","")[:40]})' for b in won[-3:]]
+    recent_lost = [f'"{b["question"][:40]}" ({b.get("reasoning","")[:40]})' for b in lost[-3:]]
+
+    return f"""Historial: {len(resolved)} resueltas, win rate {wr}%, P&L {round(total_pnl)} USDC
+Últimas GANADAS: {"; ".join(recent_won) if recent_won else "ninguna"}
+Últimas PERDIDAS (NO repetir estos errores): {"; ".join(recent_lost) if recent_lost else "ninguna"}
+SESGOS A EXPLOTAR: eventos imposibles sobreestimados, celebridades sin actividad, fechas límite absurdas."""
 
     # Edge accuracy: did Claude's prob align with outcome?
     edge_hits = 0
@@ -638,7 +732,7 @@ def bot_bet():
                 vol  = float(m.get("volume", 0))
                 if not (0.20 < prob < 0.80):
                     continue
-                if vol < 10000:
+                if vol < 2000:
                     continue
                 end_date = m.get("endDate", m.get("end_date",""))
                 if end_date:
@@ -860,7 +954,7 @@ def performance():
 
 def bet_loop():
     while True:
-        time.sleep(900)   # every 15 min
+        time.sleep(600)   # every 10 min
         try:
             with app.test_request_context():
                 bot_bet()
