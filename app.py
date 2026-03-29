@@ -873,7 +873,7 @@ def monitor_loop():
         except Exception as e:
             print(f"[monitor_loop error] {e}")
 
-#threading.Thread(target=bet_loop,     daemon=True).start()
+threading.Thread(target=bet_loop,     daemon=True).start()
 threading.Thread(target=monitor_loop, daemon=True).start()
 
 # ── FRONTEND ──────────────────────────────────────────────────
