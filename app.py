@@ -923,6 +923,7 @@ def get_bets():
             "kelly_f":     round((b.get("kelly_f") or 0)*100, 1),
             "reasoning":   b.get("reasoning",""),
             "sources":     b.get("sources_used",""),
+            "prob_market": b.get("prob_market", 0),
         })
     return jsonify(result)
 
