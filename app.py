@@ -301,7 +301,8 @@ def detect_easy_markets(question, market_prob, end_date):
         hints.append(f"SUBESTIMADO — mercado en {round(market_prob*100)}% puede ser demasiado pesimista")
     
     return " | ".join(hints) if hints else ""
-    def get_wikipedia_date(question):
+   
+def get_wikipedia_date(question):
     """Busca fechas clave relacionadas al mercado."""
     try:
         words = [w for w in question.split() if len(w) > 4 and w.isalpha()][:4]
