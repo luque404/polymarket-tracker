@@ -1088,6 +1088,7 @@ async function loadBets(){
         <span style='color:#555'>$${b.amount}</span>
         <span class='edge-badge'>edge ${b.edge}pp</span>
         <span style='color:#555;font-size:10px'>conf ${b.confidence}/10</span>
+        <span style='color:#888;font-size:10px'>entrada ${b.prob_market ? (b.prob_market*100).toFixed(0)+"%" : "—"}</span>
         <span class='${pnlClass}' style='font-weight:500'>${b.pnl_text}</span>
         <span class='badge ${stClass}'>${b.status_text}</span>
       </div>
