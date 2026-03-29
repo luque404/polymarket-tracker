@@ -37,7 +37,8 @@ SPORTS_FILTER = [
 
 # ── DB ───────────────────────────────────────────────────────
 def get_db():
-    return psycopg2.connect(DATABASE_URL)
+    url = DATABASE_URL.replace("postgres://", "postgresql://") if DATABASE_URL else ""
+    return psycopg2.connect(url, sslmode='require')
 
 def init_db():
     if not DATABASE_URL:
