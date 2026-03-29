@@ -1211,8 +1211,7 @@ def test_metaculus():
             params={"search": "Orban Hungary", "status": "open", "limit": 3},
             headers={
                 "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": "https://www.metaculus.com/"
+                "Authorization": f"Token {METACULUS_API_KEY}"
             },
             timeout=8
         )
