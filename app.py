@@ -1205,7 +1205,9 @@ def index():
 
 @app.route("/test-metaculus")
 def test_metaculus():
-    return jsonify({"token_exists": bool(METACULUS_API_KEY), "token_preview": METACULUS_API_KEY[:8] if METACULUS_API_KEY else "vacío"})
+    import os
+    keys = [k for k in os.environ.keys() if "META" in k.upper() or "API" in k.upper()]
+    return jsonify({"env_keys": keys})
     
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
