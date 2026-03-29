@@ -37,63 +37,39 @@ SPORTS_FILTER = [
 
 # ── DB ───────────────────────────────────────────────────────
 def get_db():
-    url = DATABASE_URL.replace("postgres://", "postgresql://") if DATABASE_URL else ""
-    return psycopg2.connect(url, sslmode='require')
+    return psycopg2.connect(DATABASE_URL)
 
 def init_db():
     if not DATABASE_URL:
         return
     try:
         conn = get_db()
-        cur  = conn.cursor()
-        cur.execute("DROP TABLE IF EXISTS bets")
+        cur = conn.cursor()
         cur.execute("""
-            CREATE TABLE bets (
-                id               TEXT PRIMARY KEY,
-                question         TEXT,
-                market_id        TEXT,
-                side             TEXT,
-                amount           REAL,
-                prob_market      REAL,
-                prob_claude      REAL,
-                edge             REAL,
-                confidence       INTEGER,
-                kelly_f          REAL,
-                status           TEXT DEFAULT 'open',
-                pnl              REAL DEFAULT 0,
-                reasoning        TEXT,
-                sources_used     TEXT,
-                price_entry      REAL,
-                price_current    REAL,
-                take_profit_hit  BOOLEAN DEFAULT FALSE,
-                stop_loss_hit    BOOLEAN DEFAULT FALSE,
-                created_at       TIMESTAMPTZ DEFAULT NOW(),
-                resolved_at      TIMESTAMPTZ
+            CREATE TABLE IF NOT EXISTS bets (
+                id TEXT PRIMARY KEY,
+                question TEXT,
+                side TEXT,
+                amount REAL,
+                prob REAL,
+                status TEXT,
+                pnl REAL
             )
         """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS state (
-                key   TEXT PRIMARY KEY,
+                key TEXT PRIMARY KEY,
                 value TEXT
             )
         """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS market_snapshots (
-                id         SERIAL PRIMARY KEY,
-                market_id  TEXT,
-                question   TEXT,
-                price      REAL,
-                volume     REAL,
-                snapped_at TIMESTAMPTZ DEFAULT NOW()
-            )
-        """)
-        for k, v in [("balance","10000.0"),("won","0"),("lost","0"),("total_edge","0"),("bets_placed","0")]:
-            cur.execute("INSERT INTO state(key,value) VALUES(%s,%s) ON CONFLICT DO NOTHING",(k,v))
+        cur.execute("INSERT INTO state (key, value) VALUES ('balance', '10000.0') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO state (key, value) VALUES ('won', '0') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO state (key, value) VALUES ('lost', '0') ON CONFLICT DO NOTHING")
         conn.commit()
-        cur.close(); conn.close()
-    except Exception as e:
-        print(f"[DB init error] {e}")
-
+        cur.close()
+        conn.close()
+    except:
+        pass
 init_db()
 
 def get_state(key, default=0.0):
