@@ -102,23 +102,21 @@ def save_bet(bet):
         conn = get_db(); cur = conn.cursor()
         cur.execute("""
             INSERT INTO bets
-                (id,question,market_id,side,amount,prob_market,prob_claude,edge,confidence,
-                 kelly_f,status,pnl,reasoning,sources_used,price_entry,price_current)
+                (id, question, market_id, side, amount, prob_market, prob_claude,
+                 edge, confidence, kelly_f, status, pnl, reasoning, sources_used,
+                 price_entry, price_current)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT(id) DO UPDATE SET
-                status=EXCLUDED.status, pnl=EXCLUDED.pnl,
-                price_current=EXCLUDED.price_current,
-                take_profit_hit=EXCLUDED.take_profit_hit,
-                stop_loss_hit=EXCLUDED.stop_loss_hit,
-                resolved_at=EXCLUDED.resolved_at
-        """, (bet["id"], bet["question"], bet.get("market_id",""),
-              bet["side"], bet["amount"], bet["prob_market"],
-              bet.get("prob_claude", bet["prob_market"]),
-              bet.get("edge",0), bet.get("confidence",5),
-              bet.get("kelly_f",0.03), bet["status"], bet["pnl"],
-              bet.get("reasoning",""), bet.get("sources_used",""),
-              bet.get("price_entry", bet["prob_market"]),
-              bet.get("price_current", bet["prob_market"])))
+            ON CONFLICT (id) DO UPDATE SET
+                status=EXCLUDED.status, pnl=EXCLUDED.pnl
+        """, (
+            bet["id"], bet["question"], bet.get("market_id",""),
+            bet["side"], bet["amount"],
+            bet.get("prob_market", 0.5), bet.get("prob_claude", 0.5),
+            bet.get("edge", 0), bet.get("confidence", 5),
+            bet.get("kelly_f", 0.03), bet["status"], bet["pnl"],
+            bet.get("reasoning",""), bet.get("sources_used",""),
+            bet.get("price_entry", 0.5), bet.get("price_current", 0.5)
+        ))
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         print(f"[save_bet error] {e}")
