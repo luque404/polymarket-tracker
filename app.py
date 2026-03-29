@@ -688,7 +688,7 @@ def place_bet(question, market_id, side, amount, prob_market,
 def bot_bet():
     try:
         # 1. Fetch markets
-        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=100", timeout=8)
+        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=500", timeout=8)
         data    = r.json()
         markets = data if isinstance(data, list) else data.get("markets",[])
 
@@ -1137,7 +1137,7 @@ def setup_db():
 @app.route("/debug")
 def debug():
     try:
-        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=100", timeout=8)
+        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=500", timeout=8)
         data = r.json()
         markets = data if isinstance(data, list) else data.get("markets",[])
         total = len(markets)
@@ -1150,7 +1150,7 @@ def debug():
                 if isinstance(prices, str): prices = json.loads(prices)
                 prob = float(prices[0])
                 vol = float(m.get("volume",0))
-                if 0.20 < prob < 0.80 and vol > 100:
+                if 0.15 < prob < 0.85 and vol > 100:
                     in_range.append(m.get("question","")[:60])
             except: continue
         return jsonify({
