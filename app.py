@@ -1201,12 +1201,16 @@ def index():
 def test_metaculus():
     try:
         r = requests.get(
-            "https://www.metaculus.com/api/questions/",
+            "https://www.metaculus.com/api2/questions/",
             params={"search": "Orban Hungary", "status": "open", "limit": 3},
-            headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://www.metaculus.com/"
+            },
             timeout=8
         )
-        return jsonify({"status": r.status_code, "raw": r.json()})
+        return jsonify({"status": r.status_code, "text": r.text[:500]})
     except Exception as e:
         return jsonify({"error": str(e)})
     
