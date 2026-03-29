@@ -182,33 +182,6 @@ def get_news_signal(question):
     except:
         return "", 0.0
 
-def get_gdelt_signal(question):
-    """Busca en GDELT eventos y noticias relacionados - completamente gratis"""
-    try:
-        words = [w for w in question.split() if len(w) > 4][:3]
-        query = "+".join(words)
-        r = requests.get(
-            "https://api.gdeltproject.org/api/v2/doc/doc",
-            params={
-                "query": query,
-                "mode": "artlist",
-                "maxrecords": 5,
-                "format": "json",
-                "timespan": "30d",
-                "sourcelang": "english"
-            },
-            timeout=8
-        )
-        data = r.json()
-        articles = data.get("articles", [])
-        if not articles:
-            return "", 0.0
-        titles = [a.get("title", "") for a in articles[:4] if a.get("title")]
-        text = " | ".join(titles[:3])
-        return f"GDELT: {text}", len(titles) / 4.0
-    except:
-        return "", 0.0
-
 def get_metaculus_signal(question):
     """Busca en Metaculus y retorna probabilidad de expertos"""
     if not METACULUS_API_KEY:
@@ -233,6 +206,42 @@ def get_metaculus_signal(question):
                     title = item.get("title", "")[:50]
                     return f"Metaculus: '{title}' → {round(p*100)}% expertos", p
         return "", 0.0
+    except:
+        return "", 0.0
+
+def get_wikipedia_signal(question):
+    """Busca en Wikipedia contexto sobre el tema - gratis y sin rate limit"""
+    try:
+        words = [w for w in question.split() if len(w) > 4][:3]
+        query = " ".join(words)
+        r = requests.get(
+            "https://en.wikipedia.org/api/rest_v1/page/summary/" + query.replace(" ", "_"),
+            headers={"User-Agent": "PolymarketBot/1.0"},
+            timeout=6
+        )
+        if r.status_code != 200:
+            # Intentar búsqueda
+            r2 = requests.get(
+                "https://en.wikipedia.org/w/api.php",
+                params={"action": "query", "list": "search", "srsearch": query,
+                        "format": "json", "srlimit": 1},
+                headers={"User-Agent": "PolymarketBot/1.0"},
+                timeout=6
+            )
+            results = r2.json().get("query", {}).get("search", [])
+            if not results:
+                return "", 0.0
+            title = results[0]["title"]
+            r = requests.get(
+                f"https://en.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ', '_')}",
+                headers={"User-Agent": "PolymarketBot/1.0"},
+                timeout=6
+            )
+        data = r.json()
+        extract = data.get("extract", "")
+        if not extract:
+            return "", 0.0
+        return f"Wikipedia: {extract[:300]}", 0.5
     except:
         return "", 0.0
 
@@ -356,9 +365,10 @@ def aggregate_signals(question, market_id, market_prob):
     news_text, news_conf = get_news_signal(question)
     if news_text:
         signals.append(news_text); source_list.append("NewsAPI")
-    gdelt_text, gdelt_conf = get_gdelt_signal(question)
-    if gdelt_text:
-        signals.append(gdelt_text); source_list.append("GDELT")
+
+    wiki_text, wiki_conf = get_wikipedia_signal(question)
+    if wiki_text:
+        signals.append(wiki_text); source_list.append("Wikipedia")
 
     reddit_text, reddit_conf = get_reddit_sentiment(question)
     if reddit_text:
@@ -1249,24 +1259,10 @@ def test_metaculus():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-@app.route("/test-gdelt")
-def test_gdelt():
-    try:
-        r = requests.get(
-            "https://api.gdeltproject.org/api/v2/doc/doc",
-            params={
-                "query": "Orban Hungary",
-                "mode": "artlist",
-                "maxrecords": 5,
-                "format": "json",
-                "timespan": "30d",
-                "sourcelang": "english"
-            },
-            timeout=8
-        )
-        return jsonify({"status": r.status_code, "raw": r.text[:500]})
-    except Exception as e:
-        return jsonify({"error": str(e)})
+@app.route("/test-wiki")
+def test_wiki():
+    text, score = get_wikipedia_signal("Will Viktor Orban be Prime Minister of Hungary")
+    return jsonify({"text": text, "score": score})
     
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
