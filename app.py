@@ -21,6 +21,7 @@ app = Flask(__name__)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 DATABASE_URL      = os.environ.get("DATABASE_URL", "")
 NEWS_API_KEY      = os.environ.get("NEWS_API_KEY", "")
+METACULUS_API_KEY = os.environ.get("METACULUS_API_KEY", "")
 REDDIT_CLIENT_ID  = os.environ.get("REDDIT_CLIENT_ID", "")
 REDDIT_SECRET     = os.environ.get("REDDIT_SECRET", "")
 
