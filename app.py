@@ -182,6 +182,33 @@ def get_news_signal(question):
     except:
         return "", 0.0
 
+def get_gdelt_signal(question):
+    """Busca en GDELT eventos y noticias relacionados - completamente gratis"""
+    try:
+        words = [w for w in question.split() if len(w) > 4][:3]
+        query = "+".join(words)
+        r = requests.get(
+            "https://api.gdeltproject.org/api/v2/doc/doc",
+            params={
+                "query": query,
+                "mode": "artlist",
+                "maxrecords": 5,
+                "format": "json",
+                "timespan": "30d",
+                "sourcelang": "english"
+            },
+            timeout=8
+        )
+        data = r.json()
+        articles = data.get("articles", [])
+        if not articles:
+            return "", 0.0
+        titles = [a.get("title", "") for a in articles[:4] if a.get("title")]
+        text = " | ".join(titles[:3])
+        return f"GDELT: {text}", len(titles) / 4.0
+    except:
+        return "", 0.0
+
 def get_metaculus_signal(question):
     """Busca en Metaculus y retorna probabilidad de expertos"""
     if not METACULUS_API_KEY:
@@ -329,6 +356,9 @@ def aggregate_signals(question, market_id, market_prob):
     news_text, news_conf = get_news_signal(question)
     if news_text:
         signals.append(news_text); source_list.append("NewsAPI")
+    gdelt_text, gdelt_conf = get_gdelt_signal(question)
+    if gdelt_text:
+        signals.append(gdelt_text); source_list.append("GDELT")
 
     reddit_text, reddit_conf = get_reddit_sentiment(question)
     if reddit_text:
