@@ -1199,8 +1199,16 @@ def index():
 
 @app.route("/test-metaculus")
 def test_metaculus():
-    text, prob = get_metaculus_signal("Will Viktor Orban be Prime Minister of Hungary")
-    return jsonify({"text": text, "prob": prob})
+    try:
+        r = requests.get(
+            "https://www.metaculus.com/api/questions/",
+            params={"search": "Orban Hungary", "status": "open", "limit": 3},
+            headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+            timeout=8
+        )
+        return jsonify({"status": r.status_code, "raw": r.json()})
+    except Exception as e:
+        return jsonify({"error": str(e)})
     
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
