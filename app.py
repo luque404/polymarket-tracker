@@ -668,7 +668,9 @@ def bot_bet():
         available = [(m, p) for m, p in available
                      if m.get("question","")[:80] not in existing_questions
                      and not topic_overlap(m.get("question",""))]
-
+        open_count = len([b for b in get_all_bets() if b["status"]=="open"])
+        if open_count >= 15:
+            return jsonify({"message": f"Máximo 15 apuestas abiertas ({open_count} activas)", "reasoning": ""})
         if not available:
             return jsonify({"message": "Sin mercados nuevos disponibles", "reasoning": ""})
 
@@ -941,7 +943,6 @@ h1{font-size:18px;font-weight:500;margin-bottom:3px}
     <div style="display:flex;gap:6px;flex-wrap:wrap">
       <button class="btn" onclick="loadMarkets()">Actualizar</button>
       <button class="btn" onclick="doMonitor()">Monitor</button>
-      <button class="btn" onclick="fetch('/clear-open',{method:'POST'}).then(r=>r.json()).then(d=>alert(d.message))">Limpiar viejas</button>
       <button class="btn btn-primary" onclick="botBet()">🧠 Apostar con IA</button>
     </div>
   </div>
