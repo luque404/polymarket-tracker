@@ -1206,8 +1206,7 @@ def index():
 @app.route("/test-metaculus")
 def test_metaculus():
     import os
-    keys = [k for k in os.environ.keys() if "META" in k.upper() or "API" in k.upper()]
-    return jsonify({"env_keys": keys})
+    return jsonify({"all_keys": list(os.environ.keys())})
     
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
