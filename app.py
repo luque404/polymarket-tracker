@@ -557,7 +557,7 @@ Fecha de resolución: {end_date}
 
 === TU TAREA ===
 1. Estima la probabilidad REAL del evento (no la del mercado)
-2. Identifica si hay edge real (diferencia > 8pp entre tu estimación y el mercado)
+2. Identifica si hay edge real (diferencia > 5pp entre tu estimación y el mercado)
 3. Decide si apostar SI o NO
 4. Evalúa tu confianza en la información disponible (1-10)
 
@@ -850,7 +850,7 @@ def bot_bet():
         edge       = best_edge
 
         # 6. Edge threshold + confidence gate
-        if edge < 0.08 or confidence < 4:
+        if edge < 0.05 or confidence < 4:
             return jsonify({
                 "message": f"Claude: edge {round(edge*100,1)}pp insuficiente (mín 8pp) o confianza baja ({confidence}/10)",
                 "reasoning": reasoning
