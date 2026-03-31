@@ -466,7 +466,7 @@ def compute_bet_size(balance, kelly_f, confidence):
     # confidence multiplier: scale between 0.5x and 1.0x
     conf_mult = 0.5 + (confidence / 10) * 0.5
     amount = base * conf_mult
-    return min(300, max(10, round(amount, 2)))
+    return min(300, max(5, round(amount, 2)))
 
 # ── DUAL CLAUDE PIPELINE ──────────────────────────────────────
 
