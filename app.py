@@ -794,7 +794,7 @@ def bot_bet():
         def topic_overlap(question):
             words   = question.lower().split()
             matches = sum(1 for w in words if len(w) > 5 and w in existing_keywords)
-            return matches >= 3
+            return matches >= 4
 
         available = [(m, p) for m, p in available
                      if m.get("question","")[:80] not in existing_questions
