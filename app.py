@@ -476,12 +476,12 @@ def haiku_filter(markets_with_prob):
     Takes list of (market, prob), returns top 5 most interesting.
     """
     if not ANTHROPIC_API_KEY:
-        return markets_with_prob[:5]
+        return markets_with_prob[:8]
     try:
         perf_ctx = get_performance_context()
         market_list = "\n".join([
             f"{i+1}. [{round(p*100)}%] {m.get('question','')[:80]} (vol: ${round(float(m.get('volume',0))/1000)}K)"
-            for i, (m, p) in enumerate(markets_with_prob[:30])
+            for i, (m, p) in enumerate(markets_with_prob[:50])
         ])
         prompt = f"""Eres un filtro rápido de mercados de predicción.
 
@@ -491,12 +491,12 @@ Contexto de rendimiento del bot:
 Lista de mercados disponibles:
 {market_list}
 
-Selecciona los 5 mercados con MAYOR potencial de edge (donde el mercado puede estar equivocado).
+Selecciona los 8 mercados con MAYOR potencial de edge (donde el mercado puede estar equivocado).
 Prioriza: eventos con información asimétrica, mercados con momentum claro, probabilidades extremas injustificadas.
 Evita: mercados donde tenemos historial malo, temas sin información disponible.
 
 Responde SOLO con JSON:
-{{"top": [1, 3, 7, 12, 18]}}
+{{"top": [1, 3, 7, 12, 18, 22, 25, 30]}}
 (indices de los mercados seleccionados)"""
 
         r = requests.post(
@@ -514,10 +514,10 @@ Responde SOLO con JSON:
         data  = json.loads(match.group()) if match else {}
         indices = [i-1 for i in data.get("top", []) if 0 < i <= len(markets_with_prob)]
         if indices:
-            return [markets_with_prob[i] for i in indices[:5]]
+            return [markets_with_prob[i] for i in indices[:8]]
     except Exception as e:
         print(f"[haiku_filter error] {e}")
-    return markets_with_prob[:5]
+    return markets_with_prob[:8]
 
 def sonnet_analyze(question, market_prob, end_date, market_id, signals_text, meta_pred=None):
     """
