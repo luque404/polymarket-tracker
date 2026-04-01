@@ -221,6 +221,7 @@ STATE_DEFAULTS = {
     "current_strategy_version": CURRENT_STRATEGY_VERSION,
     "paper_starting_balance": str(DEFAULT_BALANCE),
     "lab_resets": "0",
+    "recent_candidate_cache": "{}",
 }
 
 BACKGROUND_LOOPS_LOCK = threading.Lock()
@@ -498,6 +499,74 @@ def build_cycle_summary(analyzed_count, shortlist_count, selected, watchlist, re
         "obvious_selected": obvious_count,
         "blockers": top_blockers,
     }
+
+
+def get_recent_candidate_cache():
+    return safe_json_loads(get_state_text("recent_candidate_cache", "{}"), {})
+
+
+def set_recent_candidate_cache(cache):
+    set_state("recent_candidate_cache", json.dumps(cache))
+
+
+def candidate_identity_keys(candidate):
+    packet = candidate["packet"]
+    question = normalize_question(candidate.get("question", packet.get("market_question", ""))).lower()
+    semantic_key = "|".join([
+        packet.get("category", ""),
+        packet.get("semantic_subject", ""),
+        packet.get("semantic_event", ""),
+        packet.get("semantic_deadline", "") or "",
+        candidate.get("side", ""),
+    ]).lower()
+    return {
+        "market_id": candidate.get("market_id") or packet.get("market_id", ""),
+        "question_key": hash_text(question),
+        "semantic_key": hash_text(semantic_key),
+    }
+
+
+def is_duplicate_or_near_duplicate(candidate, existing_bets, selected):
+    identity = candidate_identity_keys(candidate)
+    packet = candidate["packet"]
+    for bet in list(existing_bets) + list(selected):
+        if identity["market_id"] and identity["market_id"] == bet.get("market_id"):
+            return True, "duplicate_market_id"
+        other_question = normalize_question(bet.get("question", "")).lower()
+        if other_question and hash_text(other_question) == identity["question_key"]:
+            return True, "duplicate_question"
+        overlap = len(top_overlap_terms(packet.get("market_question", ""), bet.get("question", "")))
+        same_category = bet.get("category") == packet.get("category")
+        same_side = bet.get("side") == candidate.get("side")
+        same_thesis = bet.get("thesis_type") == candidate.get("thesis_type")
+        if overlap >= 5 and same_side and (same_category or same_thesis):
+            return True, "duplicate_semantic_overlap"
+    return False, "ok"
+
+
+def seen_recently(candidate, cooldown_seconds=5400):
+    cache = get_recent_candidate_cache()
+    identity = candidate_identity_keys(candidate)
+    now_ts = time.time()
+    keys = [identity["market_id"], identity["question_key"], identity["semantic_key"]]
+    for key in keys:
+        if not key:
+            continue
+        last_seen = safe_float(cache.get(key), 0.0)
+        if last_seen and now_ts - last_seen < cooldown_seconds:
+            return True
+    return False
+
+
+def mark_candidate_seen(candidate):
+    cache = get_recent_candidate_cache()
+    identity = candidate_identity_keys(candidate)
+    now_ts = time.time()
+    for key in [identity["market_id"], identity["question_key"], identity["semantic_key"]]:
+        if key:
+            cache[key] = now_ts
+    pruned = {k: v for k, v in cache.items() if now_ts - safe_float(v, 0.0) < 86400}
+    set_recent_candidate_cache(pruned)
 
 
 init_db()
@@ -1123,11 +1192,11 @@ def assign_candidate_tier(candidate):
     ease_of_win = candidate.get("ease_of_win_score", 0.0)
     learning_velocity = candidate.get("learning_velocity_score", 0.0)
     score = candidate.get("portfolio_priority_score", candidate.get("compound_score", 0.0))
-    if score >= TIER_A_SCORE_FLOOR and reliability >= 0.68 and ease_of_win >= 0.58:
+    if score >= TIER_A_SCORE_FLOOR and reliability >= 0.58 and ease_of_win >= 0.52:
         return "TIER_A"
-    if score >= TIER_B_SCORE_FLOOR and reliability >= 0.48 and opportunity >= 0.44:
+    if score >= TIER_B_SCORE_FLOOR and reliability >= 0.34 and opportunity >= 0.32:
         return "TIER_B"
-    if score >= TIER_C_SCORE_FLOOR and (learning_velocity >= 0.35 or opportunity >= 0.38):
+    if score >= TIER_C_SCORE_FLOOR and (learning_velocity >= 0.20 or opportunity >= 0.24 or ease_of_win >= 0.42):
         return "TIER_C"
     return "TIER_D"
 
@@ -1559,13 +1628,16 @@ def estimate_correlation_penalty(candidate, open_bets):
     packet = candidate["packet"]
     penalties = []
     for bet in open_bets:
+        if candidate.get("market_id") and candidate.get("market_id") == bet.get("market_id"):
+            penalties.append(0.95)
+            continue
         overlap = len(top_overlap_terms(packet["market_question"], bet.get("question", "")))
         same_category = bet.get("category") == packet["category"]
         same_thesis = bet.get("thesis_type") == candidate.get("thesis_type")
         same_side = bet.get("side") == candidate.get("side")
-        penalty = (0.10 if same_category else 0.0) + (0.10 if same_thesis else 0.0) + (0.08 if same_side else 0.0) + min(overlap * 0.04, 0.20)
+        penalty = (0.12 if same_category else 0.0) + (0.12 if same_thesis else 0.0) + (0.10 if same_side else 0.0) + min(overlap * 0.05, 0.26)
         penalties.append(penalty)
-    return clamp(max(penalties), 0.0, 0.6)
+    return clamp(max(penalties), 0.0, 0.95)
 
 
 def current_portfolio_snapshot(all_bets=None):
@@ -1696,6 +1768,13 @@ def select_portfolio(candidates, snapshot):
         if candidate["analysis"].get("skip") and not obvious_override:
             rejected.append((candidate, "llm_skip"))
             continue
+        is_dup, dup_reason = is_duplicate_or_near_duplicate(candidate, snapshot["open_bets"], selected)
+        if is_dup:
+            rejected.append((candidate, dup_reason))
+            continue
+        if seen_recently(candidate) and not obvious_override:
+            rejected.append((candidate, "recently_evaluated"))
+            continue
         if trade_class == "skip" or tier == "TIER_D":
             rejected.append((candidate, "tier_skip"))
             continue
@@ -1760,6 +1839,7 @@ def select_portfolio(candidates, snapshot):
         candidate["kelly_f"] = kelly_f
         candidate["selection_bucket"] = "selected_now"
         selected.append(candidate)
+        mark_candidate_seen(candidate)
         snapshot["free_balance"] = round(snapshot["free_balance"] - amount, 2)
         snapshot["committed"] += amount
         snapshot["open_bets"].append({"question": candidate["question"], "side": candidate["side"], "category": candidate["packet"]["category"], "thesis_type": candidate["thesis_type"], "amount": amount, "trade_class": trade_class, "tier": tier, "horizon_bucket": candidate.get("horizon_bucket", "medium")})
@@ -2066,6 +2146,8 @@ def aggregate_metrics():
     legacy_bets = get_legacy_bets()
     open_bets = get_open_bets(bets)
     realized = [bet for bet in bets if bet.get("status") in ("won", "lost")]
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    recent_opened = [bet for bet in bets if bet.get("created_at") and bet.get("created_at") >= recent_cutoff]
     realized_pnl = round(sum(safe_float(bet.get("pnl"), 0.0) for bet in realized), 2)
     unrealized_pnl = round(sum(estimate_unrealized_pnl(bet) for bet in open_bets), 2)
     snapshot = current_portfolio_snapshot(bets)
@@ -2187,6 +2269,7 @@ def aggregate_metrics():
         "current_strategy_version": get_current_strategy_version(),
         "paper_starting_balance": get_paper_starting_balance(),
         "average_bets_per_cycle": round(int(get_state("bets_placed", 0)) / max(1, int(get_state("cycles_run", 0))), 2),
+        "trades_last_hour": len(recent_opened),
         "core_open": snapshot["core_open"],
         "secondary_open": snapshot["secondary_open"],
         "experimental_open": snapshot["experimental_open"],
@@ -2630,7 +2713,7 @@ function setValue(id,text,raw){const el=document.getElementById(id);el.textConte
 function renderTradeCard(b){return `<div class='trade-card'><div class='trade-top'><div><div class='trade-q'>${b.question}</div><div class='badge-row'><span class='badge ${b.trade_class}'>${b.trade_class}</span><span class='badge'>${b.tier}</span><span class='badge'>${b.horizon_bucket||'—'}</span><span class='badge'>${b.category}</span></div></div><div class='badge'>${b.status_text}</div></div><div class='trade-grid'><div class='meta-box'><span>Posición</span><strong>${b.side} · ${money(b.amount)}</strong></div><div class='meta-box'><span>PnL</span><strong class='${metricClass(b.pnl||0)}'>${b.pnl_text}</strong></div><div class='meta-box'><span>Entry / Current</span><strong>${b.price_entry||0} / ${b.price_current||0}</strong></div><div class='meta-box'><span>Edge / Confidence</span><strong>${b.edge}pp · ${b.confidence}/10</strong></div><div class='meta-box'><span>Reliability / Ease</span><strong>${b.reliability}% · ${b.ease_of_win}%</strong></div><div class='meta-box'><span>Priority / Bucket</span><strong>${b.portfolio_priority_score}% · ${titleCase(b.selection_bucket)}</strong></div></div><div class='trade-foot'><strong>Señal clave:</strong> ${b.key_signal||'—'}<br><strong>Invalidación:</strong> ${b.invalidation_condition||'—'}<br><strong>Racional:</strong> ${b.reasoning||'—'}</div></div>`}
 function renderWatchCard(item){return `<div class='watch-card'><div class='watch-top'><div><div class='watch-q'>${item.question}</div><div class='badge-row'><span class='badge ${item.trade_class||'watch'}'>${item.trade_class||'watchlist'}</span><span class='badge'>${item.tier||'—'}</span><span class='badge'>${item.horizon_bucket||'—'}</span></div></div></div><div class='trade-grid'><div class='meta-box'><span>Priority</span><strong>${Math.round((item.portfolio_priority_score||0)*100)}%</strong></div><div class='meta-box'><span>Opportunity</span><strong>${Math.round((item.opportunity_score||0)*100)}%</strong></div><div class='meta-box'><span>Reliability</span><strong>${Math.round((item.reliability||0)*100)}%</strong></div><div class='meta-box'><span>Estado</span><strong>${titleCase(item.selection_bucket||'watchlist_high_potential')}</strong></div></div><div class='watch-foot'>${item.reason||'Necesita un poco más de prioridad o espacio en portfolio antes de entrar.'}</div></div>`}
 
-async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Strategy: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Bankroll inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Legacy archivado: ${d.legacy_trades_archived||0}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.55?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*25 + (1-Math.abs((d.portfolio_exposure||0)-0.42))*25 + Math.min((d.positions_per_cycle_last||0)/10,1)*20 + Math.min((d.watchlist_last_cycle||0)/8,1)*10 + Math.min((d.coverage_breadth||0)/6,1)*20));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`Capital libre ${money(d.capital_free)} · comprometido ${money(d.capital_committed)} · ${d.open_current_lab||0} trades abiertos · avg bets/cycle ${d.average_bets_per_cycle||0}.`;document.getElementById('perf-summary').innerHTML=`PnL total <strong>${money(d.total_pnl)}</strong>. Realizado <strong>${money(d.realized_pnl)}</strong>, unrealized <strong>${money(d.unrealized_pnl)}</strong>. Hold medio <strong>${d.average_hold_time_hours||0}h</strong> y feedback temprano en <strong>${d.early_feedback_pct||0}%</strong> de los trades cerrados.`;document.getElementById('mix-summary').innerHTML=`Exposure por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Exposure por horizon:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay posiciones abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Winrate por learning velocity:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Winrate por time bucket:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay buckets suficientes.')}`;document.getElementById('pattern-summary').innerHTML=`Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}<br>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>PnL por tier:<br>${objectLines(d.pnl_by_tier,'Todavía no hay PnL por tier.')}`;document.getElementById('debug-summary').innerHTML=`Legacy archivados: <strong>${d.legacy_trades_archived||0}</strong><br>Descartados por evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartados por correlación/exposure: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Selected / watchlist / rejected: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong>`}
+async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Strategy: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Bankroll inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Legacy archivado: ${d.legacy_trades_archived||0}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.7?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*22 + (1-Math.abs((d.portfolio_exposure||0)-0.48))*18 + Math.min((d.positions_per_cycle_last||0)/16,1)*24 + Math.min((d.trades_last_hour||0)/8,1)*16 + Math.min((d.coverage_breadth||0)/8,1)*20));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`Capital libre ${money(d.capital_free)} · comprometido ${money(d.capital_committed)} · ${d.open_current_lab||0} trades abiertos · ${d.trades_last_hour||0} trades en la última hora · avg bets/cycle ${d.average_bets_per_cycle||0}.`;document.getElementById('perf-summary').innerHTML=`PnL total <strong>${money(d.total_pnl)}</strong>. Realizado <strong>${money(d.realized_pnl)}</strong>, unrealized <strong>${money(d.unrealized_pnl)}</strong>. Hold medio <strong>${d.average_hold_time_hours||0}h</strong> y feedback temprano en <strong>${d.early_feedback_pct||0}%</strong> de los trades cerrados.`;document.getElementById('mix-summary').innerHTML=`Exposure por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Exposure por horizon:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay posiciones abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Winrate por learning velocity:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Winrate por time bucket:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay buckets suficientes.')}<br><br>Obvious trades último ciclo: <strong>${d.obvious_trades_last_cycle||0}</strong>`;document.getElementById('pattern-summary').innerHTML=`Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}<br>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>PnL por tier:<br>${objectLines(d.pnl_by_tier,'Todavía no hay PnL por tier.')}`;document.getElementById('debug-summary').innerHTML=`Legacy archivados: <strong>${d.legacy_trades_archived||0}</strong><br>Descartados por evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartados por correlación/exposure: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Selected / watchlist / rejected: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong><br>Trades última hora: <strong>${d.trades_last_hour||0}</strong>`}
 async function loadCycle(){const d=await fetch('/candidate-scores').then(r=>r.json());const s=d.summary||{};document.getElementById('cycle-message').textContent=s.headline||'Todavía no hay resumen del último ciclo.';document.getElementById('cycle-analyzed').textContent=s.analyzed||0;document.getElementById('cycle-shortlist').textContent=s.shortlist||0;document.getElementById('cycle-selected').textContent=s.selected||0;document.getElementById('cycle-watchlist').textContent=s.watchlist||0;document.getElementById('cycle-rejected').textContent=s.rejected||0;document.getElementById('cycle-mix').innerHTML=`<div class='metric-item'><span>Core</span><strong>${s.core_selected||0}</strong></div><div class='metric-item'><span>Secondary</span><strong>${s.secondary_selected||0}</strong></div><div class='metric-item'><span>Exploratory</span><strong>${s.exploratory_selected||0}</strong></div><div class='metric-item'><span>Obvious overrides</span><strong>${s.obvious_selected||0}</strong></div>`;const blockers=Object.entries(d.blockers||{});document.getElementById('blockers').innerHTML=blockers.length?blockers.map(([k,v])=>`<div class='reason-item'><span>${titleCase(k)}</span><strong>${v}</strong></div>`).join(''):"<div class='reason-item'><span>No hubo bloqueos relevantes en el último ciclo.</span><strong>OK</strong></div>";document.getElementById('watchlist').innerHTML=(d.watchlist||[]).length?(d.watchlist||[]).slice(0,8).map(renderWatchCard).join(''):"<div class='empty'>No hay candidatos en watchlist en este ciclo.</div>";document.getElementById('live-tag').textContent=(s.selected||0)>0?'Operando':(s.watchlist||0)>0?'Observando':'En espera';document.getElementById('bot-status').textContent=(s.selected||0)>0?'Bot operando':(s.watchlist||0)>0?'Bot viendo oportunidades':'Bot en espera';document.getElementById('bot-reasoning').textContent=s.headline||'Todavía no hay actividad reciente suficiente.'}
 async function loadBets(){const d=await fetch('/bets').then(r=>r.json());document.getElementById('bets').innerHTML=d.length?d.map(renderTradeCard).join(''):"<div class='empty'>Todavía no hay trades en este laboratorio.</div>"}
 async function runCycle(){document.getElementById('bot-status').textContent='Corriendo ciclo';document.getElementById('bot-reasoning').textContent='Investigando mercados, armando ranking y evaluando entradas.';const d=await fetch('/bot-bet',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.placed?'Bot operando':'Bot en espera';document.getElementById('bot-reasoning').textContent=d.message||d.reasoning||'';await loadAll()}
