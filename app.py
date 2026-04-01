@@ -232,6 +232,8 @@ LAST_CYCLE_DATA = {
     "selected": [],
     "watchlist": [],
     "rejected": [],
+    "summary": {},
+    "blockers": {},
 }
 
 
@@ -462,6 +464,38 @@ def archive_current_lab_and_reset(balance=None):
     archive_result = archive_lab_epoch(old_epoch, archive_open=True)
     reset_result = reset_lab_state(balance=balance)
     return {**archive_result, **reset_result, "previous_lab_epoch": old_epoch}
+
+
+def build_cycle_summary(analyzed_count, shortlist_count, selected, watchlist, rejected):
+    core_count = sum(1 for item in selected if item.get("trade_class") == "core")
+    secondary_count = sum(1 for item in selected if item.get("trade_class") == "secondary")
+    exploratory_count = sum(1 for item in selected if item.get("trade_class") == "experimental")
+    reason_counts = Counter(reason for _, reason in rejected)
+    top_blockers = dict(reason_counts.most_common(6))
+    if selected:
+        headline = f"Se agregaron {len(selected)} trades: {core_count} core, {secondary_count} secondary y {exploratory_count} exploratory."
+    elif watchlist:
+        top_reason = next(iter(top_blockers), "prioridad insuficiente")
+        headline = f"Analizó {analyzed_count} mercados. Encontró {len(watchlist)} oportunidades en watchlist, pero no hubo entradas por {top_reason}."
+    elif shortlist_count:
+        top_reason = next(iter(top_blockers), "falta de edge claro")
+        headline = f"Analizó {analyzed_count} mercados. {shortlist_count} pasaron el filtro inicial, pero ninguno alcanzó prioridad suficiente para entrar."
+        if top_reason not in ("low_score",):
+            headline = f"{headline[:-1]} Motivo principal: {top_reason}."
+    else:
+        headline = f"Analizó {analyzed_count} mercados y no encontró candidatos suficientemente fuertes para pasar el filtro inicial."
+    return {
+        "headline": headline,
+        "analyzed": analyzed_count,
+        "shortlist": shortlist_count,
+        "selected": len(selected),
+        "watchlist": len(watchlist),
+        "rejected": len(rejected),
+        "core_selected": core_count,
+        "secondary_selected": secondary_count,
+        "exploratory_selected": exploratory_count,
+        "blockers": top_blockers,
+    }
 
 
 init_db()
@@ -1972,6 +2006,8 @@ def run_bot_cycle():
         }
         for candidate, reason in rejected[:40]
     ]
+    LAST_CYCLE_DATA["summary"] = build_cycle_summary(len(candidates), len(shortlist), selected, watchlist, rejected)
+    LAST_CYCLE_DATA["blockers"] = LAST_CYCLE_DATA["summary"].get("blockers", {})
     set_state("cycles_run", get_state("cycles_run", 0) + 1)
     set_state("markets_analyzed_last_cycle", len(candidates))
     set_state("discarded_low_evidence_last_cycle", sum(1 for _, reason in rejected if reason in ("low_evidence", "weak_edge_or_confidence", "low_score")))
@@ -2123,12 +2159,10 @@ def bot_bet():
     try:
         result = run_bot_cycle()
         placed = result["placed"]
+        summary = LAST_CYCLE_DATA.get("summary", {})
         if not placed:
-            return jsonify({"message": f"Sin trades nuevos. Analizados {result['analyzed']}, shortlist {result['shortlisted']}, watchlist {result.get('watchlist', 0)}, portfolio 0.", "reasoning": "Disciplina: las oportunidades prometedoras se fueron a watchlist y no se forzó entrada floja."})
-        core_count = sum(1 for bet in placed if bet.get("trade_class") == "core")
-        secondary_count = sum(1 for bet in placed if bet.get("trade_class") == "secondary")
-        experimental_count = sum(1 for bet in placed if bet.get("trade_class") == "experimental")
-        return jsonify({"message": f"Portfolio actualizado: {len(placed)} trades nuevos ({core_count} core, {secondary_count} secondary, {experimental_count} exploratory) de {result['analyzed']} mercados analizados; watchlist {result.get('watchlist', 0)}.", "reasoning": "; ".join([bet.get("reasoning", "") for bet in placed[:4]]), "placed": len(placed), "cycle_id": result["cycle_id"]})
+            return jsonify({"message": summary.get("headline", f"Sin trades nuevos. Analizados {result['analyzed']}, shortlist {result['shortlisted']}, watchlist {result.get('watchlist', 0)}."), "reasoning": " | ".join(f"{key}: {value}" for key, value in list(summary.get("blockers", {}).items())[:3]), "placed": 0, "cycle_id": result["cycle_id"]})
+        return jsonify({"message": summary.get("headline", f"Portfolio actualizado: {len(placed)} trades nuevos."), "reasoning": "; ".join([bet.get("reasoning", "") for bet in placed[:4]]), "placed": len(placed), "cycle_id": result["cycle_id"]})
     except Exception as exc:
         logger.exception("bot cycle failed")
         return jsonify({"message": f"Error: {exc}", "reasoning": ""}), 500
@@ -2175,6 +2209,8 @@ def bets_endpoint():
             "amount": round(safe_float(bet.get("amount"), 0.0), 2),
             "pnl": pnl,
             "pnl_text": "—" if bet.get("status") == "open" else f"{('+' if pnl > 0 else '')}{round(pnl, 2)} USDC",
+            "price_entry": round(safe_float(bet.get("price_entry"), 0.0), 3),
+            "price_current": round(safe_float(bet.get("price_current"), 0.0), 3),
             "status": bet.get("status"),
             "status_text": {"open": "abierta", "won": "ganada", "lost": "perdida", "lab_reset_archived": "archivada"}.get(bet.get("status"), bet.get("status")),
             "edge": round(safe_float(bet.get("edge"), 0.0) * 100, 1),
@@ -2254,6 +2290,8 @@ def candidate_scores():
         "watchlist_high_potential": LAST_CYCLE_DATA["watchlist"],
         "rejected": LAST_CYCLE_DATA["rejected"],
         "rejected_low_quality": LAST_CYCLE_DATA["rejected"],
+        "summary": LAST_CYCLE_DATA["summary"],
+        "blockers": LAST_CYCLE_DATA["blockers"],
     })
 
 
@@ -2345,42 +2383,219 @@ def start_background_loops():
 HTML = """<!DOCTYPE html>
 <html>
 <head>
-<title>Polymarket Research Portfolio Bot</title>
+<title>Polymarket Research Lab</title>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e8e8e8;padding:20px;max-width:1100px;margin:0 auto}h1{font-size:20px;margin-bottom:4px}.sub{font-size:12px;color:#666;margin-bottom:18px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}.metric,.card{background:#111;border:1px solid #1f1f1f;border-radius:12px;padding:14px}.metric-label,.section-title{font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.08em}.metric-value{font-size:20px;margin-top:6px}.row{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.btn{padding:6px 14px;border-radius:8px;border:1px solid #2a2a2a;background:transparent;color:#fff;cursor:pointer}.btn-primary{background:#ececec;color:#111;border-color:#ececec}.positive{color:#4caf50}.negative{color:#f44336}.neutral{color:#999}.section-title{margin:14px 0 6px}.trade{padding:10px 0;border-bottom:1px solid #1d1d1d}.trade:last-child{border-bottom:none}.bad{color:#f44336}.good{color:#4caf50}.badge{display:inline-block;font-size:10px;padding:2px 7px;border-radius:999px;background:#1c1c1c;color:#ccc}.core{background:#0f2e0f;color:#6bd27a}.secondary{background:#10263a;color:#7bc7ff}.experimental{background:#2d2610;color:#e4c766}.meta{font-size:11px;color:#777;margin-top:4px;line-height:1.4}.empty{color:#666;font-size:12px}@media(max-width:700px){.metrics{grid-template-columns:repeat(2,1fr)}}
+:root{--bg:#080b11;--panel:#101620;--panel-soft:#141c28;--line:#242f3d;--text:#edf2f7;--muted:#8b96a8;--soft:#b9c2cf;--accent:#87e7c0;--accent-2:#8dbbff;--warn:#f0ce7a;--danger:#ff8b8b}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(circle at top,rgba(83,118,173,.18),transparent 30%),linear-gradient(180deg,#070a10,#0b1017);color:var(--text);font-family:Inter,Segoe UI,system-ui,sans-serif}
+.app-shell{max-width:1360px;margin:0 auto;padding:28px 20px 42px}
+.topbar{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:20px}
+.title-block h1{margin:0;font-size:30px;letter-spacing:-.04em}
+.title-block p{margin:10px 0 0;color:var(--muted);max-width:760px;line-height:1.55}
+.pill-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.pill{padding:8px 12px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.03);font-size:12px;color:var(--soft)}
+.actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+.btn{padding:10px 14px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer;font-weight:700}
+.btn:hover{transform:translateY(-1px)}
+.btn-primary{background:linear-gradient(135deg,#97e6c4,#63ceb0);color:#06130d;border-color:transparent}
+.btn-secondary{background:linear-gradient(135deg,#9dc5ff,#7194f5);color:#0a1120;border-color:transparent}
+.btn-danger{background:linear-gradient(135deg,#ff9c9c,#ff7676);color:#260808;border-color:transparent}
+.dashboard{display:grid;grid-template-columns:2fr 1fr;gap:18px}
+.column{display:flex;flex-direction:column;gap:18px}
+.panel{background:linear-gradient(180deg,rgba(18,24,33,.98),rgba(14,19,27,.98));border:1px solid var(--line);border-radius:22px;padding:18px}
+.hero{display:grid;grid-template-columns:1.3fr .9fr;gap:16px}
+.hero-card,.stat,.mini-stat,.trade-card,.watch-card{background:var(--panel-soft);border:1px solid rgba(255,255,255,.05);border-radius:18px}
+.hero-card{padding:20px}
+.eyebrow,.section-kicker{font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--muted)}
+.hero-value{font-size:34px;letter-spacing:-.05em;margin-top:10px}
+.hero-copy{margin-top:10px;color:var(--soft);font-size:14px;line-height:1.55}
+.status-strip{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-top:16px;padding-top:14px;border-top:1px solid rgba(255,255,255,.06)}
+.status-badge,.badge{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid rgba(255,255,255,.06);background:#1b2230;color:#d1dae5}
+.status-badge{padding:8px 12px;color:var(--accent);background:rgba(135,231,192,.08);border-color:rgba(135,231,192,.2)}
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.stat{padding:16px}
+.stat-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}
+.stat-value{margin-top:9px;font-size:28px;letter-spacing:-.04em}
+.stat-note{margin-top:8px;color:var(--soft);font-size:12px;line-height:1.45}
+.positive{color:var(--accent)}.negative{color:var(--danger)}.neutral{color:var(--soft)}
+.section-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:14px}
+.section-title{font-size:18px;font-weight:700;letter-spacing:-.02em}
+.section-sub{margin-top:4px;color:var(--muted);font-size:13px}
+.cycle-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:14px}
+.mini-stat{padding:14px}
+.mini-stat strong{display:block;font-size:22px;margin-top:6px}
+.message-card{padding:16px;border-radius:16px;background:rgba(135,231,192,.08);border:1px solid rgba(135,231,192,.14);color:#e4faf1;line-height:1.6}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+.list{display:grid;gap:12px}
+.trade-card,.watch-card{padding:16px}
+.trade-top,.watch-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.trade-q,.watch-q{font-size:15px;font-weight:700;line-height:1.45}
+.badge-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.core{background:rgba(135,231,192,.12);color:#90e8c7}.secondary{background:rgba(141,187,255,.14);color:#a3caff}.experimental{background:rgba(240,206,122,.15);color:#f1d891}
+.trade-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+.meta-box{padding:10px 12px;border-radius:14px;background:#0f151f;border:1px solid rgba(255,255,255,.04)}
+.meta-box span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.11em;margin-bottom:6px}
+.meta-box strong{font-size:13px;color:var(--text);line-height:1.45}
+.trade-foot,.watch-foot{margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.05);font-size:13px;color:var(--soft);line-height:1.55}
+.reason-list,.metric-list{display:grid;gap:8px}
+.reason-item,.metric-item{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px;color:var(--soft)}
+.reason-item:last-child,.metric-item:last-child{border-bottom:none}
+.empty{padding:28px 18px;border-radius:18px;border:1px dashed rgba(255,255,255,.08);text-align:center;color:var(--muted);background:rgba(255,255,255,.02)}
+details{border-top:1px solid rgba(255,255,255,.06);padding-top:14px}
+details:first-of-type{border-top:none;padding-top:0}
+summary{cursor:pointer;font-weight:700}
+.summary-copy{margin-top:10px;font-size:13px;color:var(--soft);line-height:1.6}
+@media(max-width:1180px){.dashboard,.hero,.split{grid-template-columns:1fr}.stat-grid{grid-template-columns:repeat(2,1fr)}.cycle-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:760px){.app-shell{padding:18px 14px 28px}.topbar{flex-direction:column}.actions{justify-content:flex-start}.stat-grid,.cycle-grid,.trade-grid,.split{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-<h1>Polymarket Research Portfolio Bot</h1>
-<div class="sub">Research packets · Claude estructurado · Portfolio allocation · Research lab activo</div>
-<div class="metrics">
-<div class="metric"><div class="metric-label">Capital libre</div><div class="metric-value" id="capital-free">$0</div></div>
-<div class="metric"><div class="metric-label">Capital comprometido</div><div class="metric-value" id="capital-committed">$0</div></div>
-<div class="metric"><div class="metric-label">Exposure</div><div class="metric-value" id="portfolio-exposure">0%</div></div>
-<div class="metric"><div class="metric-label">PnL total</div><div class="metric-value" id="total-pnl">$0</div></div>
-<div class="metric"><div class="metric-label">PnL realizado</div><div class="metric-value" id="realized-pnl">$0</div></div>
-<div class="metric"><div class="metric-label">PnL unrealized</div><div class="metric-value" id="unrealized-pnl">$0</div></div>
-<div class="metric"><div class="metric-label">Core / Secondary / Exploratory</div><div class="metric-value" id="core-exp">0 / 0 / 0</div></div>
-<div class="metric"><div class="metric-label">Analizados / Portfolio</div><div class="metric-value" id="cycle-stats">0 / 0</div></div>
+<div class="app-shell">
+  <div class="topbar">
+    <div class="title-block">
+      <h1>Polymarket Research Lab</h1>
+      <p>Dashboard operativo para entender rápido el estado del laboratorio, el capital, las oportunidades detectadas y el comportamiento del bot en el último ciclo.</p>
+      <div class="pill-row">
+        <div class="pill" id="lab-pill">Lab activo: —</div>
+        <div class="pill" id="strategy-pill">Strategy: —</div>
+        <div class="pill" id="bankroll-pill">Bankroll inicial: —</div>
+        <div class="pill" id="legacy-pill">Legacy archivado: —</div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn" onclick="loadAll()">Actualizar</button>
+      <button class="btn" onclick="doMonitor()">Monitor</button>
+      <button class="btn btn-primary" onclick="runCycle()">Correr ciclo</button>
+      <button class="btn btn-secondary" onclick="fundPaper()">Fund paper</button>
+      <button class="btn btn-danger" onclick="resetLab()">Reset lab</button>
+    </div>
+  </div>
+
+  <div class="dashboard">
+    <div class="column">
+      <div class="panel hero">
+        <div class="hero-card">
+          <div class="eyebrow">Estado general</div>
+          <div class="hero-value" id="bot-status">Bot listo</div>
+          <div class="hero-copy" id="bot-reasoning">Esperando datos del laboratorio actual.</div>
+          <div class="status-strip">
+            <div>
+              <div class="eyebrow">Último ciclo</div>
+              <div class="hero-copy" id="cycle-message">Todavía no hay resumen del último ciclo.</div>
+            </div>
+            <div class="status-badge" id="live-tag">En espera</div>
+          </div>
+        </div>
+        <div class="hero-card">
+          <div class="eyebrow">Salud del laboratorio</div>
+          <div class="hero-value" id="health-score">0%</div>
+          <div class="hero-copy" id="health-summary">Sin datos todavía para evaluar throughput, coverage y uso del capital.</div>
+        </div>
+      </div>
+
+      <div class="stat-grid">
+        <div class="stat"><div class="stat-label">Capital libre</div><div class="stat-value" id="capital-free">$0</div><div class="stat-note">Caja disponible para nuevas entradas.</div></div>
+        <div class="stat"><div class="stat-label">Capital comprometido</div><div class="stat-value" id="capital-committed">$0</div><div class="stat-note">Capital hoy desplegado en trades abiertos.</div></div>
+        <div class="stat"><div class="stat-label">Exposure</div><div class="stat-value" id="portfolio-exposure">0%</div><div class="stat-note">Uso actual del capital del lab.</div></div>
+        <div class="stat"><div class="stat-label">PnL total</div><div class="stat-value" id="total-pnl">0</div><div class="stat-note">Realizado + unrealized del epoch activo.</div></div>
+        <div class="stat"><div class="stat-label">Trades activos</div><div class="stat-value" id="open-trades">0</div><div class="stat-note">Posiciones abiertas del portfolio actual.</div></div>
+        <div class="stat"><div class="stat-label">Mix operativo</div><div class="stat-value" id="core-exp">0 / 0 / 0</div><div class="stat-note">Core / Secondary / Exploratory.</div></div>
+        <div class="stat"><div class="stat-label">Último ciclo</div><div class="stat-value" id="cycle-stats">0 / 0</div><div class="stat-note">Analizados / enviados a portfolio.</div></div>
+        <div class="stat"><div class="stat-label">Watchlist</div><div class="stat-value" id="watchlist-count">0</div><div class="stat-note">Prometedoras pero todavía sin entrada.</div></div>
+      </div>
+
+      <div class="panel">
+        <div class="section-head">
+          <div>
+            <div class="section-kicker">Último ciclo</div>
+            <div class="section-title">Qué hizo el bot</div>
+            <div class="section-sub">Resumen claro del escaneo, la selección y los motivos de no entrada.</div>
+          </div>
+        </div>
+        <div class="cycle-grid">
+          <div class="mini-stat"><div class="eyebrow">Analizados</div><strong id="cycle-analyzed">0</strong></div>
+          <div class="mini-stat"><div class="eyebrow">Shortlist</div><strong id="cycle-shortlist">0</strong></div>
+          <div class="mini-stat"><div class="eyebrow">Portfolio</div><strong id="cycle-selected">0</strong></div>
+          <div class="mini-stat"><div class="eyebrow">Watchlist</div><strong id="cycle-watchlist">0</strong></div>
+          <div class="mini-stat"><div class="eyebrow">Rechazados</div><strong id="cycle-rejected">0</strong></div>
+        </div>
+        <div class="split">
+          <div class="panel" style="padding:14px">
+            <div class="section-kicker">Mix del ciclo</div>
+            <div class="metric-list" id="cycle-mix"><div class="metric-item"><span>Sin datos</span><strong>—</strong></div></div>
+          </div>
+          <div class="panel" style="padding:14px">
+            <div class="section-kicker">Motivos de no entrada</div>
+            <div class="reason-list" id="blockers"><div class="reason-item"><span>Sin bloqueos todavía</span><strong>—</strong></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="section-head">
+          <div>
+            <div class="section-kicker">Portfolio actual</div>
+            <div class="section-title">Trades abiertos</div>
+            <div class="section-sub">Visión clara del capital desplegado, calidad de cada trade y su invalidación.</div>
+          </div>
+        </div>
+        <div class="list" id="bets"><div class="empty">Todavía no hay trades en este laboratorio.</div></div>
+      </div>
+    </div>
+
+    <div class="column">
+      <div class="panel">
+        <div class="section-head">
+          <div>
+            <div class="section-kicker">Watchlist</div>
+            <div class="section-title">Candidatos prometedores</div>
+            <div class="section-sub">Para distinguir si no apostó porque no encontró nada o porque todavía está esperando mejor entrada.</div>
+          </div>
+        </div>
+        <div class="list" id="watchlist"><div class="empty">No hay candidatos en watchlist en este ciclo.</div></div>
+      </div>
+
+      <div class="panel">
+        <div class="section-head">
+          <div>
+            <div class="section-kicker">Salud y métricas</div>
+            <div class="section-title">Resumen del laboratorio</div>
+            <div class="section-sub">Primero lo importante; abajo el detalle más técnico cuando haga falta.</div>
+          </div>
+        </div>
+        <details open><summary>Performance summary</summary><div class="summary-copy" id="perf-summary">Cargando…</div></details>
+        <details><summary>Portfolio mix</summary><div class="summary-copy" id="mix-summary">Cargando…</div></details>
+        <details><summary>Learning metrics</summary><div class="summary-copy" id="learning-summary">Cargando…</div></details>
+        <details><summary>Winning / losing patterns</summary><div class="summary-copy" id="pattern-summary">Cargando…</div></details>
+        <details><summary>Debug summary</summary><div class="summary-copy" id="debug-summary">Cargando…</div></details>
+      </div>
+    </div>
+  </div>
 </div>
-<div class="card">
-<div class="row"><div id="bot-status">Bot listo</div><div><button class="btn" onclick="loadAll()">Actualizar</button> <button class="btn" onclick="doMonitor()">Monitor</button> <button class="btn btn-primary" onclick="runCycle()">Correr ciclo</button></div></div>
-<div class="meta" id="bot-reasoning"></div>
-</div>
-<div class="section-title">Portfolio</div>
-<div class="card" id="bets"><div class="empty">Sin apuestas todavía.</div></div>
-<div class="section-title">Patrones y métricas</div>
-<div class="card" id="insights"><div class="empty">Cargando...</div></div>
 <script>
-function colorize(el, value){el.className='metric-value '+(value>0?'positive':value<0?'negative':'neutral');}
-async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('capital-free').textContent='$'+Math.round(d.capital_free||0);document.getElementById('capital-committed').textContent='$'+Math.round(d.capital_committed||0);document.getElementById('portfolio-exposure').textContent=Math.round((d.portfolio_exposure||0)*100)+'%';const tp=document.getElementById('total-pnl');tp.textContent=(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0);colorize(tp,d.total_pnl||0);const rp=document.getElementById('realized-pnl');rp.textContent=(d.realized_pnl>=0?'+':'')+Math.round(d.realized_pnl||0);colorize(rp,d.realized_pnl||0);const up=document.getElementById('unrealized-pnl');up.textContent=(d.unrealized_pnl>=0?'+':'')+Math.round(d.unrealized_pnl||0);colorize(up,d.unrealized_pnl||0);document.getElementById('core-exp').textContent=(d.core_open||0)+' / '+(d.secondary_open||0)+' / '+(d.experimental_open||0);document.getElementById('cycle-stats').textContent=(d.markets_analyzed_last_cycle||0)+' / '+(d.positions_per_cycle_last||0);document.getElementById('insights').innerHTML=`<div class='meta'>Lab actual: ${d.current_lab_epoch||'—'} · strategy ${d.current_strategy_version||'—'} · bankroll inicial ${Math.round(d.paper_starting_balance||0)} · legacy archivados ${d.legacy_trades_archived||0}</div><div class='meta'>Exposure categoría: ${JSON.stringify(d.portfolio_exposure_by_category||{})}</div><div class='meta'>Exposure thesis: ${JSON.stringify(d.portfolio_exposure_by_thesis_type||{})}</div><div class='meta'>Exposure tier: ${JSON.stringify(d.portfolio_exposure_by_tier||{})} · horizon: ${JSON.stringify(d.portfolio_exposure_by_horizon||{})}</div><div class='meta'>PnL por categoría: ${JSON.stringify(d.pnl_by_category||{})}</div><div class='meta'>PnL por tier: ${JSON.stringify(d.pnl_by_tier||{})} · por mispricing: ${JSON.stringify(d.performance_by_mispricing_type||{})}</div><div class='meta'>Winrate confidence: ${JSON.stringify(d.winrate_by_confidence_bucket||{})}</div><div class='meta'>Winrate edge: ${JSON.stringify(d.winrate_by_edge_bucket||{})}</div><div class='meta'>Winrate learning velocity: ${JSON.stringify(d.winrate_by_learning_velocity||{})}</div><div class='meta'>Winrate time bucket: ${JSON.stringify(d.winrate_by_time_to_resolution_bucket||{})}</div><div class='meta'>Core/secondary/exploratory: ${JSON.stringify(d.winrate_core_vs_exploratory||{})}</div><div class='meta'>Feedback temprano: ${d.early_feedback_pct||0}% · capital reciclado: $${Math.round(d.capital_reused_by_early_closure||0)} · hold medio: ${d.average_hold_time_hours||0}h · pnl/día proxy: ${d.pnl_per_day_proxy||0}</div><div class='meta'>Último ciclo: selected core ${d.selected_core_last_cycle||0}, secondary ${d.selected_secondary_last_cycle||0}, exploratory ${d.selected_exploratory_last_cycle||0}, watchlist ${d.watchlist_last_cycle||0} · avg bets/cycle ${d.average_bets_per_cycle||0}</div><div class='meta'>Coverage breadth: ${d.coverage_breadth||0} · overlap concentration: ${Math.round((d.overlap_concentration||0)*100)}% · capital efficiency: ${Math.round((d.capital_efficiency||0)*100)}%</div><div class='meta'>Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}</div><div class='meta'>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}</div><div class='meta'>Descartados por evidencia: ${d.discarded_low_evidence_last_cycle||0} · por correlación/exposure: ${d.discarded_correlation_last_cycle||0}</div>`;}
-async function loadBets(){const d=await fetch('/bets').then(r=>r.json());if(!d.length){document.getElementById('bets').innerHTML="<div class='empty'>Sin apuestas todavía.</div>";return;}document.getElementById('bets').innerHTML=d.map(b=>`<div class='trade'><div class='row'><div style='font-size:13px;flex:1'>${b.question}</div><div><span class='badge ${b.trade_class}'>${b.trade_class}</span> <span class='badge'>${b.tier}</span> <span class='badge'>${b.category}</span> <span class='badge'>${b.mispricing_type}</span></div></div><div class='meta'>${b.side} · $${b.amount} · priority ${b.portfolio_priority_score} · opp ${b.opportunity_score} · ease ${b.ease_of_win} · mispricing ${b.mispricing_score} · edge ${b.edge}pp</div><div class='meta'>reliability ${b.reliability} · learn vel ${b.learning_velocity} · learnability ${b.market_learnability} · horizon ${b.horizon_bucket||'—'} · feedback ${b.time_bucket||'—'}</div><div class='meta'>conf ${b.confidence}/10 · sourceQ ${b.source_quality} · evidence ${b.evidence_strength} · contradictions ${b.contradictions} · uncertainty ${b.uncertainty}</div><div class='meta'>Lab ${b.lab_epoch||'—'} · strategy ${b.strategy_version||'—'} · señal clave: ${b.key_signal||'—'} · invalidación: ${b.invalidation_condition||'—'} · bucket ${b.selection_bucket||'selected_now'}</div><div class='meta'>${b.status_text} · ${b.pnl_text} · ${b.reasoning}</div></div>`).join('');}
-async function runCycle(){document.getElementById('bot-status').textContent='Investigando mercados y armando portfolio...';const d=await fetch('/bot-bet',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.message||'Ciclo ejecutado';document.getElementById('bot-reasoning').textContent=d.reasoning||'';await loadAll();}
-async function doMonitor(){document.getElementById('bot-status').textContent='Monitoreando portfolio...';const d=await fetch('/monitor',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.message||'Monitor ejecutado';await loadAll();}
-async function loadAll(){await loadMetrics();await loadBets();}
-loadAll();setInterval(loadAll,12000);
+function money(value){return '$'+Math.round(value||0).toLocaleString('en-US')}
+function pct(value){return Math.round((value||0)*100)+'%'}
+function metricClass(value){return value>0?'positive':value<0?'negative':'neutral'}
+function titleCase(value){return (value||'—').replaceAll('_',' ')}
+function objectLines(obj, empty='—'){const entries=Object.entries(obj||{});if(!entries.length)return empty;return entries.map(([k,v])=>`${titleCase(k)}: ${typeof v==='object'?JSON.stringify(v):v}`).join('<br>')}
+async function postJson(url,payload){const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});return res.json()}
+
+function setValue(id,text,raw){const el=document.getElementById(id);el.textContent=text;if(raw!==undefined){el.className=(el.className.includes('hero-value')?'hero-value ':'stat-value ')+metricClass(raw)}}
+
+function renderTradeCard(b){return `<div class='trade-card'><div class='trade-top'><div><div class='trade-q'>${b.question}</div><div class='badge-row'><span class='badge ${b.trade_class}'>${b.trade_class}</span><span class='badge'>${b.tier}</span><span class='badge'>${b.horizon_bucket||'—'}</span><span class='badge'>${b.category}</span></div></div><div class='badge'>${b.status_text}</div></div><div class='trade-grid'><div class='meta-box'><span>Posición</span><strong>${b.side} · ${money(b.amount)}</strong></div><div class='meta-box'><span>PnL</span><strong class='${metricClass(b.pnl||0)}'>${b.pnl_text}</strong></div><div class='meta-box'><span>Entry / Current</span><strong>${b.price_entry||0} / ${b.price_current||0}</strong></div><div class='meta-box'><span>Edge / Confidence</span><strong>${b.edge}pp · ${b.confidence}/10</strong></div><div class='meta-box'><span>Reliability / Ease</span><strong>${b.reliability}% · ${b.ease_of_win}%</strong></div><div class='meta-box'><span>Priority / Bucket</span><strong>${b.portfolio_priority_score}% · ${titleCase(b.selection_bucket)}</strong></div></div><div class='trade-foot'><strong>Señal clave:</strong> ${b.key_signal||'—'}<br><strong>Invalidación:</strong> ${b.invalidation_condition||'—'}<br><strong>Racional:</strong> ${b.reasoning||'—'}</div></div>`}
+function renderWatchCard(item){return `<div class='watch-card'><div class='watch-top'><div><div class='watch-q'>${item.question}</div><div class='badge-row'><span class='badge ${item.trade_class||'watch'}'>${item.trade_class||'watchlist'}</span><span class='badge'>${item.tier||'—'}</span><span class='badge'>${item.horizon_bucket||'—'}</span></div></div></div><div class='trade-grid'><div class='meta-box'><span>Priority</span><strong>${Math.round((item.portfolio_priority_score||0)*100)}%</strong></div><div class='meta-box'><span>Opportunity</span><strong>${Math.round((item.opportunity_score||0)*100)}%</strong></div><div class='meta-box'><span>Reliability</span><strong>${Math.round((item.reliability||0)*100)}%</strong></div><div class='meta-box'><span>Estado</span><strong>${titleCase(item.selection_bucket||'watchlist_high_potential')}</strong></div></div><div class='watch-foot'>${item.reason||'Necesita un poco más de prioridad o espacio en portfolio antes de entrar.'}</div></div>`}
+
+async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Strategy: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Bankroll inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Legacy archivado: ${d.legacy_trades_archived||0}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.55?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*25 + (1-Math.abs((d.portfolio_exposure||0)-0.42))*25 + Math.min((d.positions_per_cycle_last||0)/10,1)*20 + Math.min((d.watchlist_last_cycle||0)/8,1)*10 + Math.min((d.coverage_breadth||0)/6,1)*20));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`Capital libre ${money(d.capital_free)} · comprometido ${money(d.capital_committed)} · ${d.open_current_lab||0} trades abiertos · avg bets/cycle ${d.average_bets_per_cycle||0}.`;document.getElementById('perf-summary').innerHTML=`PnL total <strong>${money(d.total_pnl)}</strong>. Realizado <strong>${money(d.realized_pnl)}</strong>, unrealized <strong>${money(d.unrealized_pnl)}</strong>. Hold medio <strong>${d.average_hold_time_hours||0}h</strong> y feedback temprano en <strong>${d.early_feedback_pct||0}%</strong> de los trades cerrados.`;document.getElementById('mix-summary').innerHTML=`Exposure por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Exposure por horizon:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay posiciones abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Winrate por learning velocity:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Winrate por time bucket:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay buckets suficientes.')}`;document.getElementById('pattern-summary').innerHTML=`Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}<br>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>PnL por tier:<br>${objectLines(d.pnl_by_tier,'Todavía no hay PnL por tier.')}`;document.getElementById('debug-summary').innerHTML=`Legacy archivados: <strong>${d.legacy_trades_archived||0}</strong><br>Descartados por evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartados por correlación/exposure: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Selected / watchlist / rejected: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong>`}
+async function loadCycle(){const d=await fetch('/candidate-scores').then(r=>r.json());const s=d.summary||{};document.getElementById('cycle-message').textContent=s.headline||'Todavía no hay resumen del último ciclo.';document.getElementById('cycle-analyzed').textContent=s.analyzed||0;document.getElementById('cycle-shortlist').textContent=s.shortlist||0;document.getElementById('cycle-selected').textContent=s.selected||0;document.getElementById('cycle-watchlist').textContent=s.watchlist||0;document.getElementById('cycle-rejected').textContent=s.rejected||0;document.getElementById('cycle-mix').innerHTML=`<div class='metric-item'><span>Core</span><strong>${s.core_selected||0}</strong></div><div class='metric-item'><span>Secondary</span><strong>${s.secondary_selected||0}</strong></div><div class='metric-item'><span>Exploratory</span><strong>${s.exploratory_selected||0}</strong></div>`;const blockers=Object.entries(d.blockers||{});document.getElementById('blockers').innerHTML=blockers.length?blockers.map(([k,v])=>`<div class='reason-item'><span>${titleCase(k)}</span><strong>${v}</strong></div>`).join(''):"<div class='reason-item'><span>No hubo bloqueos relevantes en el último ciclo.</span><strong>OK</strong></div>";document.getElementById('watchlist').innerHTML=(d.watchlist||[]).length?(d.watchlist||[]).slice(0,8).map(renderWatchCard).join(''):"<div class='empty'>No hay candidatos en watchlist en este ciclo.</div>";document.getElementById('live-tag').textContent=(s.selected||0)>0?'Operando':(s.watchlist||0)>0?'Observando':'En espera';document.getElementById('bot-status').textContent=(s.selected||0)>0?'Bot operando':(s.watchlist||0)>0?'Bot viendo oportunidades':'Bot en espera';document.getElementById('bot-reasoning').textContent=s.headline||'Todavía no hay actividad reciente suficiente.'}
+async function loadBets(){const d=await fetch('/bets').then(r=>r.json());document.getElementById('bets').innerHTML=d.length?d.map(renderTradeCard).join(''):"<div class='empty'>Todavía no hay trades en este laboratorio.</div>"}
+async function runCycle(){document.getElementById('bot-status').textContent='Corriendo ciclo';document.getElementById('bot-reasoning').textContent='Investigando mercados, armando ranking y evaluando entradas.';const d=await fetch('/bot-bet',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.placed?'Bot operando':'Bot en espera';document.getElementById('bot-reasoning').textContent=d.message||d.reasoning||'';await loadAll()}
+async function doMonitor(){document.getElementById('bot-status').textContent='Monitoreando portfolio';const d=await fetch('/monitor',{method:'POST'}).then(r=>r.json());document.getElementById('bot-reasoning').textContent=d.message||'Monitor ejecutado';await loadAll()}
+async function resetLab(){if(!confirm('Esto archivará el laboratorio actual y arrancará uno nuevo. ¿Continuar?'))return;const balance=prompt('Balance inicial del nuevo lab','50000');const d=await postJson('/lab-reset',{balance:Number(balance||50000)});document.getElementById('bot-status').textContent=d.ok?'Lab reseteado':'Error al resetear';document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
+async function fundPaper(){const amount=prompt('Capital paper a agregar','10000');if(!amount)return;const d=await postJson('/fund-paper',{amount:Number(amount)});document.getElementById('bot-status').textContent=d.ok?'Capital agregado':'No se pudo agregar capital';document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
+async function loadAll(){await Promise.all([loadMetrics(),loadCycle(),loadBets()])}
+loadAll();setInterval(loadAll,12000)
 </script>
 </body>
 </html>"""
