@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg2
 import requests
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
@@ -38,7 +38,12 @@ RESEARCH_LAB_MODE = os.environ.get("RESEARCH_LAB_MODE", "true").lower() == "true
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
-DEFAULT_BALANCE = 10000.0
+try:
+    PAPER_STARTING_BALANCE = float(os.environ.get("PAPER_STARTING_BALANCE", "50000"))
+except ValueError:
+    PAPER_STARTING_BALANCE = 50000.0
+DEFAULT_BALANCE = PAPER_STARTING_BALANCE
+CURRENT_STRATEGY_VERSION = os.environ.get("STRATEGY_VERSION", "research_lab_v4")
 FAST_MODEL = os.environ.get("CLAUDE_FAST_MODEL", "claude-haiku-4-5-20251001")
 STRONG_MODEL = os.environ.get("CLAUDE_STRONG_MODEL", "claude-sonnet-4-6")
 REQUEST_TIMEOUT = 8
@@ -48,11 +53,12 @@ INITIAL_RESOLUTION_CHECK_SECONDS = 3600
 RESOLUTION_RETRY_SECONDS = 7200
 MARKETS_FETCH_LIMIT = 500
 MARKETS_PREVIEW_LIMIT = 20
-MAX_OPEN_BETS = 48
-MAX_POSITIONS_PER_CYCLE = 8
+MAX_OPEN_BETS = 96
+MAX_POSITIONS_PER_CYCLE = 16
 MAX_CORE_POSITIONS_PER_CYCLE = 4
-MAX_EXPLORATORY_POSITIONS_PER_CYCLE = 5
-MAX_TOTAL_EXPOSURE_PCT = 0.72
+MAX_SECONDARY_POSITIONS_PER_CYCLE = 7
+MAX_EXPLORATORY_POSITIONS_PER_CYCLE = 8
+MAX_TOTAL_EXPOSURE_PCT = 0.78
 MAX_CATEGORY_EXPOSURE_PCT = 0.20
 MAX_SIDE_EXPOSURE_PCT = 0.42
 MAX_THESIS_EXPOSURE_PCT = 0.20
@@ -71,11 +77,21 @@ STOP_LOSS_THRESHOLD = 0.22
 TRAILING_STOP_GIVEBACK = 0.10
 CORE_MAX_FRACTION = 0.14
 EXPERIMENTAL_MAX_FRACTION = 0.025
-EXPERIMENTAL_SCORE_FLOOR = 0.32
-EXPLORATION_CAPITAL_RESERVE_PCT = 0.16
-LONG_DATED_PENALTY_START_DAYS = 45
-FAST_FEEDBACK_DAYS = 21
+EXPERIMENTAL_SCORE_FLOOR = 0.29
+EXPLORATION_CAPITAL_RESERVE_PCT = 0.20
+LONG_DATED_PENALTY_START_DAYS = 60
+FAST_FEEDBACK_DAYS = 28
 POLYMARKET_FEE_HAIRCUT = 0.95
+WATCHLIST_LIMIT = 16
+TIER_A_SCORE_FLOOR = 0.68
+TIER_B_SCORE_FLOOR = 0.52
+TIER_C_SCORE_FLOOR = 0.34
+OBVIOUS_ENOUGH_SCORE = 0.46
+CORE_BUDGET_PCT = 0.34
+SECONDARY_BUDGET_PCT = 0.26
+EXPLORATORY_BUDGET_PCT = 0.14
+FAST_FEEDBACK_BUDGET_PCT = 0.26
+LONG_DATED_HIGH_CONVICTION_BUDGET_PCT = 0.18
 
 SOURCE_WEIGHTS = {
     "market_native": 1.00,
@@ -132,6 +148,12 @@ BETS_SCHEMA = {
     "thesis_type": "TEXT",
     "mispricing_type": "TEXT",
     "trade_class": "TEXT DEFAULT 'core'",
+    "tier": "TEXT DEFAULT 'TIER_C'",
+    "selection_bucket": "TEXT DEFAULT 'selected_now'",
+    "horizon_bucket": "TEXT DEFAULT 'medium'",
+    "strategy_version": "TEXT DEFAULT 'legacy'",
+    "lab_epoch": "TEXT DEFAULT 'legacy'",
+    "active_lab": "BOOLEAN DEFAULT TRUE",
     "source_quality_score": "REAL DEFAULT 0",
     "source_diversity_score": "REAL DEFAULT 0",
     "factual_strength": "REAL DEFAULT 0",
@@ -140,11 +162,19 @@ BETS_SCHEMA = {
     "composite_score": "REAL DEFAULT 0",
     "mispricing_score": "REAL DEFAULT 0",
     "opportunity_score": "REAL DEFAULT 0",
+    "portfolio_priority_score": "REAL DEFAULT 0",
+    "ease_of_win_score": "REAL DEFAULT 0",
+    "market_quality_score": "REAL DEFAULT 0",
+    "liquidity_score": "REAL DEFAULT 0",
+    "spread_penalty": "REAL DEFAULT 0",
+    "capital_efficiency_score": "REAL DEFAULT 0",
+    "historical_pattern_score": "REAL DEFAULT 0",
     "learning_velocity_score": "REAL DEFAULT 0",
     "market_learnability_score": "REAL DEFAULT 0",
     "conclusion_reliability_score": "REAL DEFAULT 0",
     "recommendation_strength": "REAL DEFAULT 0",
     "market_quality": "TEXT",
+    "obvious_enough_to_take": "BOOLEAN DEFAULT FALSE",
     "external_match_confidence": "REAL DEFAULT 0",
     "microstructure_quality_score": "REAL DEFAULT 0",
     "recommended_aggression": "TEXT",
@@ -183,6 +213,14 @@ STATE_DEFAULTS = {
     "discarded_low_evidence_last_cycle": "0",
     "discarded_correlation_last_cycle": "0",
     "passed_to_portfolio_last_cycle": "0",
+    "watchlist_last_cycle": "0",
+    "selected_secondary_last_cycle": "0",
+    "selected_core_last_cycle": "0",
+    "selected_exploratory_last_cycle": "0",
+    "current_lab_epoch": "lab-1",
+    "current_strategy_version": CURRENT_STRATEGY_VERSION,
+    "paper_starting_balance": str(DEFAULT_BALANCE),
+    "lab_resets": "0",
 }
 
 BACKGROUND_LOOPS_LOCK = threading.Lock()
@@ -192,6 +230,7 @@ LAST_CYCLE_DATA = {
     "candidates": [],
     "shortlist": [],
     "selected": [],
+    "watchlist": [],
     "rejected": [],
 }
 
@@ -222,6 +261,11 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
                 for key, value in STATE_DEFAULTS.items():
                     cur.execute("INSERT INTO state (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING", (key, value))
+                cur.execute("UPDATE bets SET strategy_version=COALESCE(strategy_version, 'legacy')")
+                cur.execute("UPDATE bets SET lab_epoch=COALESCE(lab_epoch, 'legacy')")
+                cur.execute("UPDATE bets SET active_lab=COALESCE(active_lab, TRUE)")
+                cur.execute("UPDATE bets SET active_lab=FALSE WHERE lab_epoch='legacy'")
+                cur.execute("UPDATE bets SET selection_bucket=COALESCE(selection_bucket, 'legacy_archive') WHERE lab_epoch='legacy'")
         return True
     except psycopg2.Error:
         logger.exception("DB initialization failed")
@@ -242,6 +286,20 @@ def get_state(key, default=0.0):
         return default
 
 
+def get_state_text(key, default=""):
+    if not DATABASE_URL:
+        return default
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM state WHERE key=%s", (key,))
+                row = cur.fetchone()
+        return str(row[0]) if row and row[0] is not None else default
+    except psycopg2.Error:
+        logger.exception("Failed to read text state key=%s", key)
+        return default
+
+
 def set_state(key, value):
     if not DATABASE_URL:
         return False
@@ -258,13 +316,36 @@ def set_state(key, value):
         return False
 
 
-def get_all_bets():
+def get_current_lab_epoch():
+    return get_state_text("current_lab_epoch", "lab-1")
+
+
+def get_current_strategy_version():
+    return get_state_text("current_strategy_version", CURRENT_STRATEGY_VERSION)
+
+
+def get_paper_starting_balance():
+    return safe_float(get_state("paper_starting_balance", DEFAULT_BALANCE), DEFAULT_BALANCE)
+
+
+def get_all_bets(active_lab_only=False, include_legacy=True, lab_epoch=None):
     if not DATABASE_URL:
         return []
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT * FROM bets ORDER BY created_at DESC, id DESC")
+                filters = []
+                params = []
+                if active_lab_only:
+                    filters.append("COALESCE(active_lab, TRUE)=TRUE")
+                if not include_legacy:
+                    filters.append("(lab_epoch=%s OR COALESCE(active_lab, TRUE)=TRUE)")
+                    params.append(get_current_lab_epoch())
+                if lab_epoch is not None:
+                    filters.append("lab_epoch=%s")
+                    params.append(lab_epoch)
+                where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+                cur.execute(f"SELECT * FROM bets {where_clause} ORDER BY created_at DESC, id DESC", params)
                 rows = cur.fetchall()
         return [dict(row) for row in rows]
     except psycopg2.Error:
@@ -309,6 +390,78 @@ def update_bet_fields(bet_id, fields):
     except psycopg2.Error:
         logger.exception("Failed to update bet id=%s", bet_id)
         return False
+
+
+def next_lab_epoch():
+    return f"lab-{int(get_state('lab_resets', 0)) + 2}"
+
+
+def archive_lab_epoch(lab_epoch, archive_open=True):
+    if not DATABASE_URL:
+        return {"archived_total": 0, "archived_open": 0, "refund": 0.0}
+    bets = get_all_bets(lab_epoch=lab_epoch)
+    open_bets = [bet for bet in bets if bet.get("status") == "open"]
+    refund = round(sum(safe_float(bet.get("amount"), 0.0) for bet in open_bets), 2) if archive_open else 0.0
+    status_sql = "CASE WHEN status='open' THEN 'lab_reset_archived' ELSE status END" if archive_open else "status"
+    resolved_reason_sql = "CASE WHEN status='open' THEN 'lab_reset_archive' ELSE resolved_reason END" if archive_open else "resolved_reason"
+    resolved_at_sql = "CASE WHEN status='open' THEN NOW() ELSE resolved_at END" if archive_open else "resolved_at"
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE bets
+                    SET active_lab=FALSE,
+                        selection_bucket='legacy_archive',
+                        status={status_sql},
+                        resolved_reason={resolved_reason_sql},
+                        resolved_at={resolved_at_sql}
+                    WHERE lab_epoch=%s
+                    """,
+                    (lab_epoch,),
+                )
+        return {"archived_total": len(bets), "archived_open": len(open_bets), "refund": refund}
+    except psycopg2.Error:
+        logger.exception("Failed to archive lab epoch=%s", lab_epoch)
+        raise
+
+
+def reset_lab_state(new_epoch=None, balance=None):
+    target_epoch = new_epoch or next_lab_epoch()
+    target_balance = round(balance if balance is not None else get_paper_starting_balance(), 2)
+    if balance is not None:
+        set_state("paper_starting_balance", target_balance)
+    set_state("balance", target_balance)
+    set_state("won", 0)
+    set_state("lost", 0)
+    set_state("bets_placed", 0)
+    set_state("total_edge", 0)
+    set_state("cycles_run", 0)
+    set_state("markets_analyzed_last_cycle", 0)
+    set_state("discarded_low_evidence_last_cycle", 0)
+    set_state("discarded_correlation_last_cycle", 0)
+    set_state("passed_to_portfolio_last_cycle", 0)
+    set_state("watchlist_last_cycle", 0)
+    set_state("selected_core_last_cycle", 0)
+    set_state("selected_secondary_last_cycle", 0)
+    set_state("selected_exploratory_last_cycle", 0)
+    set_state("current_lab_epoch", target_epoch)
+    set_state("current_strategy_version", CURRENT_STRATEGY_VERSION)
+    set_state("lab_resets", int(get_state("lab_resets", 0)) + 1)
+    LAST_CYCLE_DATA["cycle_id"] = None
+    LAST_CYCLE_DATA["candidates"] = []
+    LAST_CYCLE_DATA["shortlist"] = []
+    LAST_CYCLE_DATA["selected"] = []
+    LAST_CYCLE_DATA["watchlist"] = []
+    LAST_CYCLE_DATA["rejected"] = []
+    return {"lab_epoch": target_epoch, "balance": target_balance}
+
+
+def archive_current_lab_and_reset(balance=None):
+    old_epoch = get_current_lab_epoch()
+    archive_result = archive_lab_epoch(old_epoch, archive_open=True)
+    reset_result = reset_lab_state(balance=balance)
+    return {**archive_result, **reset_result, "previous_lab_epoch": old_epoch}
 
 
 init_db()
@@ -729,9 +882,24 @@ def fetch_reddit_source(question):
         return {"summary": "", "count": 0, "score": 0.0, "quality": SOURCE_WEIGHTS["crowd"]}
 
 # ── MEMORY / RESEARCH ENGINE ─────────────────────────────────
+def get_current_lab_bets():
+    current_lab_epoch = get_current_lab_epoch()
+    return [bet for bet in get_all_bets(lab_epoch=current_lab_epoch) if bool(bet.get("active_lab", True))]
+
+
+def get_legacy_bets():
+    return [bet for bet in get_all_bets() if bet.get("lab_epoch") != get_current_lab_epoch() or not bool(bet.get("active_lab", True))]
+
+
 def get_open_bets(bets=None):
-    bets = bets if bets is not None else get_all_bets()
-    return [bet for bet in bets if bet.get("status") == "open"]
+    bets = bets if bets is not None else get_current_lab_bets()
+    current_lab_epoch = get_current_lab_epoch()
+    return [
+        bet for bet in bets
+        if bet.get("status") == "open"
+        and bet.get("lab_epoch", current_lab_epoch) == current_lab_epoch
+        and bool(bet.get("active_lab", True))
+    ]
 
 
 def compute_current_side_price(side, yes_price):
@@ -859,6 +1027,87 @@ def compute_conclusion_reliability(packet, analysis_confidence=5.0):
         - min(len(packet.get("missing_data_flags", [])), 4) * 0.04
     )
     return round(clamp(score, 0.0, 1.0), 4)
+
+
+def classify_horizon_bucket(days_left):
+    if days_left <= 3:
+        return "ultra_short"
+    if days_left <= 14:
+        return "short"
+    if days_left <= 60:
+        return "medium"
+    return "long"
+
+
+def compute_ease_of_win_score(packet, analysis, reliability, historical_bias):
+    score = (
+        reliability * 0.26
+        + analysis.get("evidence_strength", 0.0) * 0.18
+        + analysis.get("source_quality_score", 0.0) * 0.12
+        + packet.get("factual_strength", 0.0) * 0.10
+        + packet.get("market_learnability_score", 0.0) * 0.10
+        + packet.get("microstructure_quality_score", 0.0) * 0.08
+        + packet.get("external_match_confidence", 0.0) * 0.06
+        + clamp(historical_bias, -0.25, 0.25) * 0.60
+        - packet.get("uncertainty_score", 0.0) * 0.18
+        - min(packet.get("contradictions_found", 0), 4) * 0.045
+        - packet.get("chatter_dependency", 0.0) * 0.10
+    )
+    return round(clamp(score, 0.0, 1.0), 4)
+
+
+def compute_capital_efficiency_score(candidate):
+    packet = candidate["packet"]
+    horizon_bucket = candidate.get("horizon_bucket") or classify_horizon_bucket(packet.get("days_left", 999))
+    horizon_bonus = {"ultra_short": 0.22, "short": 0.16, "medium": 0.08, "long": -0.05}.get(horizon_bucket, 0.0)
+    score = (
+        candidate.get("learning_velocity_score", 0.0) * 0.28
+        + candidate.get("ease_of_win_score", 0.0) * 0.20
+        + candidate.get("opportunity_score", 0.0) * 0.22
+        + candidate.get("market_learnability_score", 0.0) * 0.15
+        + horizon_bonus
+        - candidate.get("correlation_penalty", 0.0) * 0.18
+    )
+    return round(clamp(score, 0.0, 1.0), 4)
+
+
+def classify_trade_class(reliability, opportunity_score, learning_velocity_score, ease_of_win_score):
+    if reliability >= 0.70 and opportunity_score >= 0.62 and ease_of_win_score >= 0.60:
+        return "core"
+    if reliability >= 0.42 and opportunity_score >= 0.42:
+        return "secondary"
+    if learning_velocity_score >= 0.35 or opportunity_score >= 0.36:
+        return "experimental"
+    return "skip"
+
+
+def assign_candidate_tier(candidate):
+    reliability = candidate.get("conclusion_reliability_score", 0.0)
+    opportunity = candidate.get("opportunity_score", 0.0)
+    ease_of_win = candidate.get("ease_of_win_score", 0.0)
+    learning_velocity = candidate.get("learning_velocity_score", 0.0)
+    score = candidate.get("portfolio_priority_score", candidate.get("compound_score", 0.0))
+    if score >= TIER_A_SCORE_FLOOR and reliability >= 0.68 and ease_of_win >= 0.58:
+        return "TIER_A"
+    if score >= TIER_B_SCORE_FLOOR and reliability >= 0.48 and opportunity >= 0.44:
+        return "TIER_B"
+    if score >= TIER_C_SCORE_FLOOR and (learning_velocity >= 0.35 or opportunity >= 0.38):
+        return "TIER_C"
+    return "TIER_D"
+
+
+def obvious_enough_to_take(candidate):
+    return (
+        candidate.get("edge", 0.0) >= 0.06 and (
+            candidate.get("portfolio_priority_score", 0.0) >= OBVIOUS_ENOUGH_SCORE
+            or candidate.get("learning_velocity_score", 0.0) >= 0.68
+            or candidate.get("ease_of_win_score", 0.0) >= 0.70
+            or (
+                candidate.get("mispricing_score", 0.0) >= 0.68
+                and candidate.get("conclusion_reliability_score", 0.0) >= 0.45
+            )
+        )
+    )
 
 
 def build_research_packet(market, market_prob, all_markets, all_bets):
@@ -1048,18 +1297,21 @@ def heuristic_analysis(packet):
         "uncertainty_score": round(packet["uncertainty_score"], 4),
         "learning_velocity": packet["learning_velocity_score"],
         "market_learnability": packet["market_learnability_score"],
+        "ease_of_win": round(clamp(packet["final_evidence_strength"] * 0.35 + packet["microstructure_quality_score"] * 0.15 + packet["source_quality_score"] * 0.20 + packet["market_learnability_score"] * 0.18 - packet["uncertainty_score"] * 0.18, 0.0, 1.0), 4),
+        "market_horizon_bucket": classify_horizon_bucket(packet.get("days_left", 999)),
         "time_sensitivity": "alta" if packet["recency_score"] > 0.7 or abs(packet["momentum_24h"]) > 0.03 else "media",
         "recommended_aggression": "high" if confidence >= 8 and evidence_strength > 0.65 else "medium" if confidence >= 6 else "low",
         "short_reason": f"{packet['thesis_type']} con score de fuentes {round(packet['source_quality_score'] * 100)}%",
         "recommendation_strength": round(clamp(evidence_strength * 0.55 + packet["source_quality_score"] * 0.25 - packet["uncertainty_score"] * 0.20, 0.0, 1.0), 4),
-        "core_vs_exploratory": "core" if packet["learning_velocity_score"] >= 0.45 and packet["final_evidence_strength"] >= 0.55 else "exploratory",
+        "core_vs_secondary_vs_exploratory": "core" if packet["learning_velocity_score"] >= 0.45 and packet["final_evidence_strength"] >= 0.55 else "secondary" if packet["final_evidence_strength"] >= 0.40 else "exploratory",
+        "take_now_vs_watchlist": "take_now" if packet["final_evidence_strength"] >= 0.42 and packet["uncertainty_score"] <= 0.70 else "watchlist",
         "invalidation_condition": "Cambio factual relevante o price action que invalide la tesis en contra",
         "skip": packet["final_evidence_strength"] < 0.30 or packet["uncertainty_score"] > 0.75,
     }
 
 # ── ANALYSIS / SCORING / PORTFOLIO ───────────────────────────
 def get_performance_context():
-    resolved = [bet for bet in get_all_bets() if bet.get("status") in ("won", "lost")]
+    resolved = [bet for bet in get_current_lab_bets() if bet.get("status") in ("won", "lost")]
     if not resolved:
         return "Sin historial todavía. Priorizar evidencia fuerte, liquidez razonable y evitar narrativa sin respaldo."
     top_patterns = Counter([bet.get("thesis_type", "?") for bet in resolved if bet.get("status") == "won"]).most_common(3)
@@ -1102,9 +1354,9 @@ def analyze_candidate(candidate, all_bets):
         analysis = heuristic_analysis(packet)
     else:
         try:
-            prompt = f"""Eres un analista disciplinado de mercados de predicción enfocado en detectar mercados mal priceados. Piensa en pricing, criterios de resolución, velocidad de aprendizaje, calidad de evidencia y calibración. No adornes ni inventes.
+            prompt = f"""Eres un analista disciplinado de mercados de predicción enfocado en detectar mercados mal priceados. Piensa en pricing, criterios de resolución, velocidad de aprendizaje, facilidad de ganar, calidad de evidencia y calibración. No adornes ni inventes. Si el caso no está listo para entrar, usa watchlist o skip.
 Devuelve solo JSON válido con estas claves exactas:
-real_prob, side, confidence, thesis_type, mispricing_type, key_signal, evidence_strength, source_quality_score, uncertainty_score, learning_velocity, market_learnability, recommendation_strength, core_vs_exploratory, what_must_be_true, what_would_invalidate_the_trade, main_risks, time_sensitivity, market_quality, invalidation_condition, short_reason, skip
+real_prob, side, confidence, thesis_type, mispricing_type, key_signal, evidence_strength, source_quality_score, uncertainty_score, learning_velocity, market_learnability, ease_of_win, market_horizon_bucket, recommendation_strength, core_vs_secondary_vs_exploratory, take_now_vs_watchlist, what_must_be_true, what_would_invalidate_the_trade, main_risks, time_sensitivity, market_quality, invalidation_condition, short_reason, skip
 
 Contexto del bot:
 {get_performance_context()}
@@ -1132,9 +1384,12 @@ Research packet:
     analysis.setdefault("uncertainty_score", packet["uncertainty_score"])
     analysis.setdefault("learning_velocity", packet["learning_velocity_score"])
     analysis.setdefault("market_learnability", packet["market_learnability_score"])
+    analysis.setdefault("ease_of_win", clamp(packet["final_evidence_strength"] * 0.38 + packet["market_learnability_score"] * 0.20 + packet["microstructure_quality_score"] * 0.12 + packet["source_quality_score"] * 0.18 - packet["uncertainty_score"] * 0.18, 0.0, 1.0))
+    analysis.setdefault("market_horizon_bucket", classify_horizon_bucket(packet.get("days_left", 999)))
     analysis.setdefault("time_sensitivity", "media")
     analysis.setdefault("recommended_aggression", "medium")
-    analysis.setdefault("core_vs_exploratory", "core" if packet["learning_velocity_score"] >= 0.45 and packet["final_evidence_strength"] >= 0.55 else "exploratory")
+    analysis.setdefault("core_vs_secondary_vs_exploratory", "core" if packet["learning_velocity_score"] >= 0.45 and packet["final_evidence_strength"] >= 0.55 else "secondary" if packet["final_evidence_strength"] >= 0.40 else "exploratory")
+    analysis.setdefault("take_now_vs_watchlist", "take_now" if packet["final_evidence_strength"] >= 0.42 and packet["uncertainty_score"] <= 0.70 else "watchlist")
     analysis.setdefault("short_reason", analysis["thesis_type"])
     analysis.setdefault("recommendation_strength", clamp(analysis["evidence_strength"] * 0.6 + analysis["source_quality_score"] * 0.25 - packet["uncertainty_score"] * 0.2, 0.0, 1.0))
     analysis.setdefault("invalidation_condition", analysis["what_would_invalidate_the_trade"])
@@ -1151,16 +1406,19 @@ Research packet:
     analysis["uncertainty_score"] = round(clamp(safe_float(analysis["uncertainty_score"]), 0.0, 1.0), 4)
     analysis["learning_velocity"] = round(clamp(safe_float(analysis["learning_velocity"]), 0.0, 1.0), 4)
     analysis["market_learnability"] = round(clamp(safe_float(analysis["market_learnability"]), 0.0, 1.0), 4)
+    analysis["ease_of_win"] = round(clamp(safe_float(analysis["ease_of_win"]), 0.0, 1.0), 4)
+    analysis["market_horizon_bucket"] = analysis["market_horizon_bucket"] if analysis["market_horizon_bucket"] in ("ultra_short", "short", "medium", "long") else classify_horizon_bucket(packet.get("days_left", 999))
     analysis["recommendation_strength"] = round(clamp(safe_float(analysis["recommendation_strength"]), 0.0, 1.0), 4)
     analysis["market_quality"] = analysis["market_quality"] if analysis["market_quality"] in ("high", "medium", "low") else "medium"
-    analysis["core_vs_exploratory"] = analysis["core_vs_exploratory"] if analysis["core_vs_exploratory"] in ("core", "exploratory") else "exploratory"
+    analysis["core_vs_secondary_vs_exploratory"] = analysis["core_vs_secondary_vs_exploratory"] if analysis["core_vs_secondary_vs_exploratory"] in ("core", "secondary", "exploratory") else "exploratory"
+    analysis["take_now_vs_watchlist"] = analysis["take_now_vs_watchlist"] if analysis["take_now_vs_watchlist"] in ("take_now", "watchlist") else "watchlist"
     analysis["skip"] = bool(analysis.get("skip")) or analysis["recommendation_strength"] < 0.25
     candidate["analysis"] = analysis
     candidate["edge"] = abs(real_prob - packet["market_prob"])
     candidate["side"] = analysis["side"]
     candidate["thesis_type"] = analysis["thesis_type"]
     candidate["conclusion_reliability_score"] = compute_conclusion_reliability(packet, analysis["confidence"])
-    candidate["trade_class"] = "core" if analysis["core_vs_exploratory"] == "core" and candidate["conclusion_reliability_score"] >= 0.56 and not analysis["skip"] else "experimental"
+    candidate["trade_class"] = analysis["core_vs_secondary_vs_exploratory"]
     memory = historical_bias_for_setup(packet["category"], analysis["thesis_type"], candidate["trade_class"], all_bets)
     candidate["memory"] = memory
     return candidate
@@ -1172,20 +1430,30 @@ def compute_candidate_score(candidate, open_bets):
     correlation_penalty = estimate_correlation_penalty(candidate, open_bets)
     liquidity_score = clamp((packet["volume"] / 25000.0), 0.0, 1.0)
     spread_score = clamp(1 - (packet["spread"] / 0.06), 0.0, 1.0)
+    spread_penalty = clamp(packet["spread"] / 0.07, 0.0, 1.0)
     momentum_context = 1 - clamp(abs(packet["momentum_24h"]) * 4, 0.0, 0.4) + clamp(packet.get("cluster_divergence", 0) * 1.2, 0.0, 0.25)
     orderbook_quality = clamp(0.5 + abs(packet["orderbook_imbalance"]) * 0.4 + (0.15 if packet["smart_money"] != "none" else 0.0) - packet["spread"] * 2, 0.0, 1.0)
     mispricing_attractiveness = clamp(candidate["edge"] * 4 + packet.get("cluster_divergence", 0) * 1.4 + abs((packet.get("external_forecast_prob") or packet["market_prob"]) - packet["market_prob"]) * 1.4, 0.0, 1.0)
     historical_bias = candidate["memory"]["bias"]
     reliability = candidate.get("conclusion_reliability_score", compute_conclusion_reliability(packet, analysis["confidence"]))
+    candidate["horizon_bucket"] = analysis.get("market_horizon_bucket", classify_horizon_bucket(packet.get("days_left", 999)))
     candidate["mispricing_score"] = round(clamp(packet.get("mispricing_score", 0.0) * 0.55 + mispricing_attractiveness * 0.45, 0.0, 1.0), 4)
     candidate["learning_velocity_score"] = round(clamp(packet.get("learning_velocity_score", 0.0) * 0.65 + analysis.get("learning_velocity", 0.0) * 0.35, 0.0, 1.0), 4)
     candidate["market_learnability_score"] = round(clamp(packet.get("market_learnability_score", 0.0) * 0.70 + analysis.get("market_learnability", 0.0) * 0.30, 0.0, 1.0), 4)
+    candidate["ease_of_win_score"] = compute_ease_of_win_score(packet, analysis, reliability, historical_bias)
+    candidate["liquidity_score"] = round(liquidity_score, 4)
+    candidate["spread_penalty"] = round(spread_penalty, 4)
+    candidate["historical_pattern_score"] = round(clamp(0.5 + historical_bias, 0.0, 1.0), 4)
+    candidate["market_quality_score"] = round(clamp(orderbook_quality * 0.35 + spread_score * 0.20 + packet.get("microstructure_quality_score", 0.0) * 0.25 + packet.get("source_quality_score", 0.0) * 0.20, 0.0, 1.0), 4)
     candidate["opportunity_score"] = round(clamp(candidate["edge"] * 1.15 + candidate["mispricing_score"] * 0.35 + analysis["recommendation_strength"] * 0.25 + liquidity_score * 0.15, 0.0, 1.0), 4)
+    candidate["capital_efficiency_score"] = compute_capital_efficiency_score(candidate)
     score = (
         candidate["opportunity_score"] * 1.35
         + reliability * 1.10
         + candidate["learning_velocity_score"] * 0.95
         + candidate["market_learnability_score"] * 0.75
+        + candidate["ease_of_win_score"] * 1.05
+        + candidate["capital_efficiency_score"] * 0.65
         + analysis["evidence_strength"] * 0.85
         + analysis["source_quality_score"] * 0.70
         + liquidity_score * 0.50
@@ -1196,9 +1464,30 @@ def compute_candidate_score(candidate, open_bets):
         - packet["uncertainty_score"] * 0.80
         - correlation_penalty * 0.85
     )
-    candidate["compound_score"] = round(clamp(score / 5.6, 0.0, 1.0), 4)
+    candidate["compound_score"] = round(clamp(score / 6.8, 0.0, 1.0), 4)
+    candidate["portfolio_priority_score"] = round(clamp(
+        candidate["opportunity_score"] * 0.30
+        + reliability * 0.22
+        + candidate["learning_velocity_score"] * 0.12
+        + candidate["ease_of_win_score"] * 0.16
+        + candidate["capital_efficiency_score"] * 0.08
+        + candidate["market_quality_score"] * 0.07
+        + candidate["historical_pattern_score"] * 0.05
+        - correlation_penalty * 0.12
+        - spread_penalty * 0.08,
+        0.0,
+        1.0,
+    ), 4)
     candidate["correlation_penalty"] = round(correlation_penalty, 4)
     candidate["conclusion_reliability_score"] = round(reliability, 4)
+    candidate["trade_class"] = classify_trade_class(
+        candidate["conclusion_reliability_score"],
+        candidate["opportunity_score"],
+        candidate["learning_velocity_score"],
+        candidate["ease_of_win_score"],
+    )
+    candidate["tier"] = assign_candidate_tier(candidate)
+    candidate["obvious_enough_to_take"] = obvious_enough_to_take(candidate)
     return candidate
 
 
@@ -1220,21 +1509,28 @@ def estimate_correlation_penalty(candidate, open_bets):
 def current_portfolio_snapshot(all_bets=None):
     bets = all_bets if all_bets is not None else get_all_bets()
     open_bets = get_open_bets(bets)
-    free_balance = get_state("balance", DEFAULT_BALANCE)
+    free_balance = get_state("balance", get_paper_starting_balance())
     committed = sum(safe_float(bet.get("amount"), 0.0) for bet in open_bets)
     total_equity = free_balance + committed
     category_exposure = defaultdict(float)
     side_exposure = defaultdict(float)
     thesis_exposure = defaultdict(float)
     core_open = 0
+    secondary_open = 0
     experimental_open = 0
+    tier_exposure = defaultdict(float)
+    horizon_exposure = defaultdict(float)
     for bet in open_bets:
         amount = safe_float(bet.get("amount"), 0.0)
         category_exposure[bet.get("category", "general")] += amount
         side_exposure[bet.get("side", "SI")] += amount
         thesis_exposure[bet.get("thesis_type", "unknown")] += amount
+        tier_exposure[bet.get("tier", "TIER_C")] += amount
+        horizon_exposure[bet.get("horizon_bucket", "medium")] += amount
         if bet.get("trade_class") == "experimental":
             experimental_open += 1
+        elif bet.get("trade_class") == "secondary":
+            secondary_open += 1
         else:
             core_open += 1
     return {
@@ -1246,13 +1542,22 @@ def current_portfolio_snapshot(all_bets=None):
         "category_exposure": dict(category_exposure),
         "side_exposure": dict(side_exposure),
         "thesis_exposure": dict(thesis_exposure),
+        "tier_exposure": dict(tier_exposure),
+        "horizon_exposure": dict(horizon_exposure),
         "core_open": core_open,
+        "secondary_open": secondary_open,
         "experimental_open": experimental_open,
+        "core_budget": round(total_equity * CORE_BUDGET_PCT, 2),
+        "secondary_budget": round(total_equity * SECONDARY_BUDGET_PCT, 2),
+        "exploratory_budget": round(total_equity * EXPLORATORY_BUDGET_PCT, 2),
+        "fast_feedback_budget": round(total_equity * FAST_FEEDBACK_BUDGET_PCT, 2),
+        "long_dated_budget": round(total_equity * LONG_DATED_HIGH_CONVICTION_BUDGET_PCT, 2),
     }
 
 
 def can_allocate(candidate, snapshot):
     total_equity = max(snapshot["total_equity"], 1.0)
+    horizon_bucket = candidate.get("horizon_bucket", "medium")
     if len(snapshot["open_bets"]) >= MAX_OPEN_BETS:
         return False, "max_open_positions"
     if snapshot["committed"] / total_equity >= MAX_TOTAL_EXPOSURE_PCT:
@@ -1263,6 +1568,8 @@ def can_allocate(candidate, snapshot):
         return False, "max_side_exposure"
     if snapshot["thesis_exposure"].get(candidate["thesis_type"], 0.0) / total_equity >= MAX_THESIS_EXPOSURE_PCT:
         return False, "max_thesis_exposure"
+    if horizon_bucket == "long" and snapshot["horizon_exposure"].get("long", 0.0) / total_equity >= LONG_DATED_HIGH_CONVICTION_BUDGET_PCT and candidate.get("tier") != "TIER_A":
+        return False, "long_dated_budget_full"
     return True, "ok"
 
 
@@ -1271,6 +1578,9 @@ def size_bet(candidate, snapshot):
     packet = candidate["packet"]
     edge = candidate["edge"]
     reliability = candidate.get("conclusion_reliability_score", 0.0)
+    trade_class = candidate["trade_class"]
+    tier = candidate.get("tier", "TIER_C")
+    horizon_bucket = candidate.get("horizon_bucket", "medium")
     base_fraction = clamp(edge * 0.72 + analysis["evidence_strength"] * 0.05 + analysis["source_quality_score"] * 0.04 + reliability * 0.05, 0.005, CORE_MAX_FRACTION)
     aggression_multiplier = {"high": 1.35, "medium": 1.0, "low": 0.70}.get(analysis["recommended_aggression"], 1.0)
     quality_multiplier = 0.65 + analysis["source_quality_score"] * 0.55 + analysis["evidence_strength"] * 0.35
@@ -1280,53 +1590,96 @@ def size_bet(candidate, snapshot):
     correlation_multiplier = clamp(1.0 - candidate["correlation_penalty"], 0.50, 1.0)
     long_dated_multiplier = 0.70 if packet.get("days_left", 999) > LONG_DATED_PENALTY_START_DAYS and candidate["edge"] < 0.14 else 1.0
     learning_multiplier = clamp(0.70 + candidate.get("learning_velocity_score", 0.0) * 0.40 + candidate.get("market_learnability_score", 0.0) * 0.25, 0.60, 1.35)
-    if candidate["trade_class"] == "experimental":
+    ease_multiplier = clamp(0.75 + candidate.get("ease_of_win_score", 0.0) * 0.45, 0.65, 1.30)
+    capital_efficiency_multiplier = clamp(0.75 + candidate.get("capital_efficiency_score", 0.0) * 0.40, 0.65, 1.20)
+    tier_multiplier = {"TIER_A": 1.15, "TIER_B": 0.82, "TIER_C": 0.55}.get(tier, 0.40)
+    horizon_multiplier = {"ultra_short": 0.88, "short": 1.00, "medium": 0.95, "long": 0.72}.get(horizon_bucket, 0.90)
+    if trade_class == "secondary":
+        base_fraction = min(base_fraction * 0.52, 0.065)
+    elif trade_class == "experimental":
         base_fraction = min(base_fraction * 0.28, EXPERIMENTAL_MAX_FRACTION)
-    final_fraction = clamp(base_fraction * aggression_multiplier * quality_multiplier * liquidity_multiplier * spread_multiplier * memory_multiplier * correlation_multiplier * long_dated_multiplier * learning_multiplier, 0.003, CORE_MAX_FRACTION if candidate["trade_class"] == "core" else EXPERIMENTAL_MAX_FRACTION)
+    final_fraction = clamp(base_fraction * aggression_multiplier * quality_multiplier * liquidity_multiplier * spread_multiplier * memory_multiplier * correlation_multiplier * long_dated_multiplier * learning_multiplier * ease_multiplier * capital_efficiency_multiplier * tier_multiplier * horizon_multiplier, 0.003, CORE_MAX_FRACTION if trade_class == "core" else 0.07 if trade_class == "secondary" else EXPERIMENTAL_MAX_FRACTION)
     usable_cash = snapshot["free_balance"]
-    if candidate["trade_class"] == "core":
+    if trade_class == "core":
         usable_cash = max(0.0, snapshot["free_balance"] - max(0.0, snapshot["exploration_capital_reserved"] - snapshot["experimental_open"] * 20))
+    elif trade_class == "secondary":
+        usable_cash = min(snapshot["free_balance"], snapshot["secondary_budget"] + max(0.0, snapshot["free_balance"] * 0.12))
     else:
         usable_cash = min(snapshot["free_balance"], snapshot["exploration_capital_reserved"] + max(0.0, snapshot["free_balance"] * 0.08))
-    amount = round(max(8.0 if candidate["trade_class"] == "experimental" else 18.0, usable_cash * final_fraction), 2)
-    amount = min(amount, snapshot["free_balance"] * (0.18 if candidate["trade_class"] == "core" else 0.06))
+    if horizon_bucket in ("ultra_short", "short"):
+        usable_cash = min(snapshot["free_balance"], usable_cash + snapshot["fast_feedback_budget"] * 0.20)
+    if horizon_bucket == "long" and trade_class != "core":
+        usable_cash *= 0.70
+    amount = round(max(8.0 if trade_class == "experimental" else 14.0 if trade_class == "secondary" else 20.0, usable_cash * final_fraction), 2)
+    amount = min(amount, snapshot["free_balance"] * (0.18 if trade_class == "core" else 0.10 if trade_class == "secondary" else 0.06))
     return amount, round(final_fraction, 4)
 
 
 def select_portfolio(candidates, snapshot):
     selected = []
+    watchlist = []
     rejected = []
     cycle_core = 0
+    cycle_secondary = 0
     cycle_exploratory = 0
-    for candidate in sorted(candidates, key=lambda item: item["compound_score"], reverse=True):
-        floor = MIN_COMPOUND_SCORE if candidate["trade_class"] == "core" else EXPERIMENTAL_SCORE_FLOOR
+    for candidate in sorted(candidates, key=lambda item: (item.get("portfolio_priority_score", 0.0), item["compound_score"]), reverse=True):
+        trade_class = candidate["trade_class"]
+        tier = candidate.get("tier", "TIER_C")
+        floor = TIER_A_SCORE_FLOOR if tier == "TIER_A" else TIER_B_SCORE_FLOOR if tier == "TIER_B" else EXPERIMENTAL_SCORE_FLOOR
         if candidate["analysis"].get("skip"):
             rejected.append((candidate, "llm_skip"))
             continue
-        if candidate["compound_score"] < floor:
-            rejected.append((candidate, "low_score"))
+        if trade_class == "skip" or tier == "TIER_D":
+            rejected.append((candidate, "tier_skip"))
             continue
-        if candidate.get("conclusion_reliability_score", 0.0) < (0.58 if candidate["trade_class"] == "core" else 0.35):
-            rejected.append((candidate, "low_reliability"))
+        if candidate["analysis"].get("take_now_vs_watchlist") == "watchlist" and len(watchlist) < WATCHLIST_LIMIT:
+            candidate["selection_bucket"] = "watchlist_high_potential"
+            watchlist.append(candidate)
             continue
-        if candidate["edge"] < MIN_EDGE_TO_BET or candidate["analysis"]["confidence"] < MIN_CONFIDENCE_TO_BET:
+        if candidate["portfolio_priority_score"] < floor and not candidate.get("obvious_enough_to_take"):
+            if len(watchlist) < WATCHLIST_LIMIT:
+                candidate["selection_bucket"] = "watchlist_high_potential"
+                watchlist.append(candidate)
+            else:
+                rejected.append((candidate, "low_score"))
+            continue
+        min_reliability = 0.58 if trade_class == "core" else 0.40 if trade_class == "secondary" else 0.28
+        if candidate.get("conclusion_reliability_score", 0.0) < min_reliability and not candidate.get("obvious_enough_to_take"):
+            if len(watchlist) < WATCHLIST_LIMIT:
+                candidate["selection_bucket"] = "watchlist_high_potential"
+                watchlist.append(candidate)
+            else:
+                rejected.append((candidate, "low_reliability"))
+            continue
+        if candidate["edge"] < (MIN_EDGE_TO_BET if trade_class != "experimental" else 0.04) or candidate["analysis"]["confidence"] < (MIN_CONFIDENCE_TO_BET if trade_class == "core" else 4):
             rejected.append((candidate, "weak_edge_or_confidence"))
             continue
-        if candidate["analysis"]["source_quality_score"] < MIN_SOURCE_QUALITY_TO_BET or candidate["analysis"]["evidence_strength"] < MIN_EVIDENCE_STRENGTH_TO_BET:
+        if candidate["analysis"]["source_quality_score"] < (MIN_SOURCE_QUALITY_TO_BET if trade_class != "experimental" else 0.28) or candidate["analysis"]["evidence_strength"] < (MIN_EVIDENCE_STRENGTH_TO_BET if trade_class != "experimental" else 0.26):
             rejected.append((candidate, "low_evidence"))
             continue
         if len(selected) >= MAX_POSITIONS_PER_CYCLE:
             rejected.append((candidate, "cycle_limit"))
             continue
-        if candidate["trade_class"] == "core" and cycle_core >= MAX_CORE_POSITIONS_PER_CYCLE:
+        if trade_class == "core" and cycle_core >= MAX_CORE_POSITIONS_PER_CYCLE:
             rejected.append((candidate, "core_cycle_limit"))
             continue
-        if candidate["trade_class"] == "experimental" and cycle_exploratory >= MAX_EXPLORATORY_POSITIONS_PER_CYCLE:
+        if trade_class == "secondary" and cycle_secondary >= MAX_SECONDARY_POSITIONS_PER_CYCLE:
+            if len(watchlist) < WATCHLIST_LIMIT:
+                candidate["selection_bucket"] = "watchlist_high_potential"
+                watchlist.append(candidate)
+            else:
+                rejected.append((candidate, "secondary_cycle_limit"))
+            continue
+        if trade_class == "experimental" and cycle_exploratory >= MAX_EXPLORATORY_POSITIONS_PER_CYCLE:
             rejected.append((candidate, "exploratory_cycle_limit"))
             continue
         allowed, reason = can_allocate(candidate, snapshot)
         if not allowed:
-            rejected.append((candidate, reason))
+            if reason in ("max_category_exposure", "max_thesis_exposure", "long_dated_budget_full") and len(watchlist) < WATCHLIST_LIMIT:
+                candidate["selection_bucket"] = "watchlist_high_potential"
+                watchlist.append(candidate)
+            else:
+                rejected.append((candidate, reason))
             continue
         amount, kelly_f = size_bet(candidate, snapshot)
         if amount < 5:
@@ -1334,25 +1687,30 @@ def select_portfolio(candidates, snapshot):
             continue
         candidate["amount"] = amount
         candidate["kelly_f"] = kelly_f
+        candidate["selection_bucket"] = "selected_now"
         selected.append(candidate)
         snapshot["free_balance"] = round(snapshot["free_balance"] - amount, 2)
         snapshot["committed"] += amount
-        snapshot["open_bets"].append({"question": candidate["question"], "side": candidate["side"], "category": candidate["packet"]["category"], "thesis_type": candidate["thesis_type"], "amount": amount, "trade_class": candidate["trade_class"]})
+        snapshot["open_bets"].append({"question": candidate["question"], "side": candidate["side"], "category": candidate["packet"]["category"], "thesis_type": candidate["thesis_type"], "amount": amount, "trade_class": trade_class, "tier": tier, "horizon_bucket": candidate.get("horizon_bucket", "medium")})
         snapshot["category_exposure"][candidate["packet"]["category"]] = snapshot["category_exposure"].get(candidate["packet"]["category"], 0.0) + amount
         snapshot["side_exposure"][candidate["side"]] = snapshot["side_exposure"].get(candidate["side"], 0.0) + amount
         snapshot["thesis_exposure"][candidate["thesis_type"]] = snapshot["thesis_exposure"].get(candidate["thesis_type"], 0.0) + amount
-        if candidate["trade_class"] == "core":
+        snapshot["tier_exposure"][tier] = snapshot["tier_exposure"].get(tier, 0.0) + amount
+        snapshot["horizon_exposure"][candidate.get("horizon_bucket", "medium")] = snapshot["horizon_exposure"].get(candidate.get("horizon_bucket", "medium"), 0.0) + amount
+        if trade_class == "core":
             cycle_core += 1
+        elif trade_class == "secondary":
+            cycle_secondary += 1
         else:
             cycle_exploratory += 1
-    return selected, rejected
+    return selected, watchlist, rejected
 
 # ── EXECUTION / MONITOR / METRICS ────────────────────────────
 def place_bet_from_candidate(candidate, cycle_id):
     packet = candidate["packet"]
     analysis = candidate["analysis"]
     amount = candidate["amount"]
-    free_balance = get_state("balance", DEFAULT_BALANCE)
+    free_balance = get_state("balance", get_paper_starting_balance())
     if free_balance < amount:
         return None
     bet = {
@@ -1379,6 +1737,12 @@ def place_bet_from_candidate(candidate, cycle_id):
         "thesis_type": analysis["thesis_type"],
         "mispricing_type": analysis["mispricing_type"],
         "trade_class": candidate["trade_class"],
+        "tier": candidate.get("tier", "TIER_C"),
+        "selection_bucket": candidate.get("selection_bucket", "selected_now"),
+        "horizon_bucket": candidate.get("horizon_bucket", classify_horizon_bucket(packet.get("days_left", 999))),
+        "strategy_version": get_current_strategy_version(),
+        "lab_epoch": get_current_lab_epoch(),
+        "active_lab": True,
         "source_quality_score": analysis["source_quality_score"],
         "source_diversity_score": packet["source_diversity_score"],
         "factual_strength": packet["factual_strength"],
@@ -1387,11 +1751,19 @@ def place_bet_from_candidate(candidate, cycle_id):
         "composite_score": candidate["compound_score"],
         "mispricing_score": candidate["mispricing_score"],
         "opportunity_score": candidate["opportunity_score"],
+        "portfolio_priority_score": candidate.get("portfolio_priority_score", candidate["compound_score"]),
+        "ease_of_win_score": candidate.get("ease_of_win_score", 0.0),
+        "market_quality_score": candidate.get("market_quality_score", 0.0),
+        "liquidity_score": candidate.get("liquidity_score", 0.0),
+        "spread_penalty": candidate.get("spread_penalty", 0.0),
+        "capital_efficiency_score": candidate.get("capital_efficiency_score", 0.0),
+        "historical_pattern_score": candidate.get("historical_pattern_score", 0.0),
         "learning_velocity_score": candidate["learning_velocity_score"],
         "market_learnability_score": candidate["market_learnability_score"],
         "conclusion_reliability_score": candidate["conclusion_reliability_score"],
         "recommendation_strength": analysis["recommendation_strength"],
         "market_quality": analysis["market_quality"],
+        "obvious_enough_to_take": candidate.get("obvious_enough_to_take", False),
         "external_match_confidence": packet["external_match_confidence"],
         "microstructure_quality_score": packet["microstructure_quality_score"],
         "recommended_aggression": analysis["recommended_aggression"],
@@ -1435,7 +1807,7 @@ def close_bet(bet, current_yes_price, status, reason, take_profit=False, stop_lo
     shares = safe_float(bet.get("amount"), 0.0) / max(entry_cost, 0.01)
     realized_value = round(shares * side_price * POLYMARKET_FEE_HAIRCUT, 2)
     pnl = round(realized_value - safe_float(bet.get("amount"), 0.0), 2)
-    set_state("balance", get_state("balance", DEFAULT_BALANCE) + max(realized_value, 0.0))
+    set_state("balance", get_state("balance", get_paper_starting_balance()) + max(realized_value, 0.0))
     if status == "won":
         set_state("won", get_state("won", 0) + 1)
     else:
@@ -1487,7 +1859,7 @@ def resolve_bet_real(bet_id):
 def run_bot_cycle():
     cycle_id = str(uuid.uuid4())
     markets = fetch_active_markets()
-    all_bets = get_all_bets()
+    all_bets = get_current_lab_bets()
     open_bets = get_open_bets(all_bets)
     now_utc = datetime.now(timezone.utc)
     candidates = []
@@ -1508,7 +1880,7 @@ def run_bot_cycle():
     shortlist = fast_prefilter(candidates)
     analyzed = [compute_candidate_score(analyze_candidate(candidate, all_bets), open_bets) for candidate in shortlist]
     snapshot = current_portfolio_snapshot(all_bets)
-    selected, rejected = select_portfolio(analyzed, snapshot)
+    selected, watchlist, rejected = select_portfolio(analyzed, snapshot)
     placed = []
     for candidate in selected:
         bet = place_bet_from_candidate(candidate, cycle_id)
@@ -1529,6 +1901,7 @@ def run_bot_cycle():
             "mispricing_flags": candidate["packet"]["mispricing_flags"],
             "learning_velocity_score": candidate["packet"]["learning_velocity_score"],
             "market_learnability_score": candidate["packet"]["market_learnability_score"],
+            "horizon_bucket": classify_horizon_bucket(candidate["packet"].get("days_left", 999)),
         }
         for candidate in candidates[:40]
     ]
@@ -1541,8 +1914,13 @@ def run_bot_cycle():
             "mispricing_score": candidate["mispricing_score"],
             "learning_velocity_score": candidate["learning_velocity_score"],
             "market_learnability_score": candidate["market_learnability_score"],
+            "ease_of_win_score": candidate["ease_of_win_score"],
+            "portfolio_priority_score": candidate["portfolio_priority_score"],
             "conclusion_reliability_score": candidate["conclusion_reliability_score"],
             "trade_class": candidate["trade_class"],
+            "tier": candidate["tier"],
+            "horizon_bucket": candidate["horizon_bucket"],
+            "obvious_enough_to_take": candidate["obvious_enough_to_take"],
             "category": candidate["packet"]["category"],
             "thesis_type": candidate["thesis_type"],
             "analysis": candidate["analysis"],
@@ -1554,22 +1932,42 @@ def run_bot_cycle():
         {
             "question": candidate["question"],
             "trade_class": candidate["trade_class"],
+            "tier": candidate.get("tier"),
+            "horizon_bucket": candidate.get("horizon_bucket"),
             "amount": candidate.get("amount", 0),
             "edge": round(candidate["edge"], 4),
             "compound_score": candidate["compound_score"],
             "opportunity_score": candidate["opportunity_score"],
+            "portfolio_priority_score": candidate["portfolio_priority_score"],
             "reliability": candidate["conclusion_reliability_score"],
             "reason": candidate["analysis"]["short_reason"],
         }
         for candidate in selected
+    ]
+    LAST_CYCLE_DATA["watchlist"] = [
+        {
+            "question": candidate["question"],
+            "trade_class": candidate["trade_class"],
+            "tier": candidate.get("tier"),
+            "horizon_bucket": candidate.get("horizon_bucket"),
+            "edge": round(candidate.get("edge", 0.0), 4),
+            "portfolio_priority_score": candidate.get("portfolio_priority_score"),
+            "opportunity_score": candidate.get("opportunity_score"),
+            "reliability": candidate.get("conclusion_reliability_score"),
+            "reason": candidate["analysis"].get("short_reason"),
+            "selection_bucket": candidate.get("selection_bucket", "watchlist_high_potential"),
+        }
+        for candidate in watchlist
     ]
     LAST_CYCLE_DATA["rejected"] = [
         {
             "question": candidate["question"],
             "reason": reason,
             "trade_class": candidate.get("trade_class"),
+            "tier": candidate.get("tier"),
+            "horizon_bucket": candidate.get("horizon_bucket"),
             "edge": round(candidate.get("edge", 0.0), 4),
-            "score": candidate.get("compound_score"),
+            "score": candidate.get("portfolio_priority_score", candidate.get("compound_score")),
             "reliability": candidate.get("conclusion_reliability_score"),
         }
         for candidate, reason in rejected[:40]
@@ -1579,11 +1977,16 @@ def run_bot_cycle():
     set_state("discarded_low_evidence_last_cycle", sum(1 for _, reason in rejected if reason in ("low_evidence", "weak_edge_or_confidence", "low_score")))
     set_state("discarded_correlation_last_cycle", sum(1 for _, reason in rejected if "exposure" in reason or reason == "max_open_positions"))
     set_state("passed_to_portfolio_last_cycle", len(placed))
-    return {"cycle_id": cycle_id, "analyzed": len(candidates), "shortlisted": len(shortlist), "selected": len(selected), "placed": placed, "rejected": rejected}
+    set_state("watchlist_last_cycle", len(watchlist))
+    set_state("selected_core_last_cycle", sum(1 for candidate in selected if candidate.get("trade_class") == "core"))
+    set_state("selected_secondary_last_cycle", sum(1 for candidate in selected if candidate.get("trade_class") == "secondary"))
+    set_state("selected_exploratory_last_cycle", sum(1 for candidate in selected if candidate.get("trade_class") == "experimental"))
+    return {"cycle_id": cycle_id, "analyzed": len(candidates), "shortlisted": len(shortlist), "selected": len(selected), "watchlist": len(watchlist), "placed": placed, "rejected": rejected}
 
 
 def aggregate_metrics():
-    bets = get_all_bets()
+    bets = get_current_lab_bets()
+    legacy_bets = get_legacy_bets()
     open_bets = get_open_bets(bets)
     realized = [bet for bet in bets if bet.get("status") in ("won", "lost")]
     realized_pnl = round(sum(safe_float(bet.get("pnl"), 0.0) for bet in realized), 2)
@@ -1592,6 +1995,7 @@ def aggregate_metrics():
     by_category = defaultdict(float)
     by_thesis = defaultdict(float)
     by_trade_class = defaultdict(float)
+    by_tier = defaultdict(float)
     confidence_stats = defaultdict(lambda: {"won": 0, "total": 0})
     edge_stats = defaultdict(lambda: {"won": 0, "total": 0})
     source_quality_stats = defaultdict(lambda: {"won": 0, "total": 0})
@@ -1609,6 +2013,7 @@ def aggregate_metrics():
         by_category[bet.get("category", "general")] += pnl
         by_thesis[bet.get("thesis_type", "unknown")] += pnl
         by_trade_class[bet.get("trade_class", "core")] += pnl
+        by_tier[bet.get("tier", "TIER_C")] += pnl
         confidence_bucket = bet.get("confidence_bucket") or bucket_confidence(int(bet.get("confidence") or 5))
         edge_bucket_name = bet.get("edge_bucket") or bucket_edge(safe_float(bet.get("edge"), 0.0))
         source_bucket = "high" if safe_float(bet.get("source_quality_score"), 0.0) >= 0.7 else "mid" if safe_float(bet.get("source_quality_score"), 0.0) >= 0.45 else "low"
@@ -1647,6 +2052,7 @@ def aggregate_metrics():
             capital_reused_early += safe_float(bet.get("amount"), 0.0)
     top_winning_patterns = Counter({key: round(value, 2) for key, value in by_thesis.items() if value > 0}).most_common(3)
     top_losing_patterns = Counter({key: round(abs(value), 2) for key, value in by_thesis.items() if value < 0}).most_common(3)
+    overlap_concentration = round(max(snapshot["category_exposure"].values(), default=0.0) / max(snapshot["committed"], 1.0), 4) if snapshot["committed"] else 0.0
     return {
         "balance": snapshot["free_balance"],
         "capital_committed": snapshot["committed"],
@@ -1655,7 +2061,11 @@ def aggregate_metrics():
         "portfolio_exposure_by_category": {k: round(v, 2) for k, v in snapshot["category_exposure"].items()},
         "portfolio_exposure_by_thesis_type": {k: round(v, 2) for k, v in snapshot["thesis_exposure"].items()},
         "portfolio_exposure_by_side": {k: round(v, 2) for k, v in snapshot["side_exposure"].items()},
+        "portfolio_exposure_by_tier": {k: round(v, 2) for k, v in snapshot["tier_exposure"].items()},
+        "portfolio_exposure_by_horizon": {k: round(v, 2) for k, v in snapshot["horizon_exposure"].items()},
         "open": len(open_bets),
+        "open_current_lab": len(open_bets),
+        "legacy_trades_archived": len(legacy_bets),
         "won": int(get_state("won", 0)),
         "lost": int(get_state("lost", 0)),
         "realized_pnl": realized_pnl,
@@ -1664,6 +2074,7 @@ def aggregate_metrics():
         "pnl_by_category": {k: round(v, 2) for k, v in by_category.items()},
         "pnl_by_thesis_type": {k: round(v, 2) for k, v in by_thesis.items()},
         "pnl_by_trade_class": {k: round(v, 2) for k, v in by_trade_class.items()},
+        "pnl_by_tier": {k: round(v, 2) for k, v in by_tier.items()},
         "winrate_by_confidence_bucket": {k: f"{round(v['won'] / v['total'] * 100)}% ({v['total']})" if v['total'] else "—" for k, v in confidence_stats.items()},
         "winrate_by_edge_bucket": {k: f"{round(v['won'] / v['total'] * 100)}% ({v['total']})" if v['total'] else "—" for k, v in edge_stats.items()},
         "winrate_by_source_quality": {k: f"{round(v['won'] / v['total'] * 100)}% ({v['total']})" if v['total'] else "—" for k, v in source_quality_stats.items()},
@@ -1685,8 +2096,25 @@ def aggregate_metrics():
         "discarded_correlation_last_cycle": int(get_state("discarded_correlation_last_cycle", 0)),
         "passed_to_portfolio_last_cycle": int(get_state("passed_to_portfolio_last_cycle", 0)),
         "positions_per_cycle_last": int(get_state("passed_to_portfolio_last_cycle", 0)),
+        "watchlist_last_cycle": int(get_state("watchlist_last_cycle", 0)),
+        "selected_core_last_cycle": int(get_state("selected_core_last_cycle", 0)),
+        "selected_secondary_last_cycle": int(get_state("selected_secondary_last_cycle", 0)),
+        "selected_exploratory_last_cycle": int(get_state("selected_exploratory_last_cycle", 0)),
+        "selection_mix_last_cycle": {
+            "selected": int(get_state("passed_to_portfolio_last_cycle", 0)),
+            "watchlist": int(get_state("watchlist_last_cycle", 0)),
+            "rejected": max(0, int(get_state("markets_analyzed_last_cycle", 0)) - int(get_state("watchlist_last_cycle", 0)) - int(get_state("passed_to_portfolio_last_cycle", 0))),
+        },
+        "current_lab_epoch": get_current_lab_epoch(),
+        "current_strategy_version": get_current_strategy_version(),
+        "paper_starting_balance": get_paper_starting_balance(),
+        "average_bets_per_cycle": round(int(get_state("bets_placed", 0)) / max(1, int(get_state("cycles_run", 0))), 2),
         "core_open": snapshot["core_open"],
+        "secondary_open": snapshot["secondary_open"],
         "experimental_open": snapshot["experimental_open"],
+        "coverage_breadth": len(snapshot["category_exposure"]),
+        "overlap_concentration": overlap_concentration,
+        "capital_efficiency": round((realized_pnl + unrealized_pnl) / max(snapshot["committed"], 1.0), 4) if snapshot["committed"] else 0.0,
     }
 
 
@@ -1696,10 +2124,11 @@ def bot_bet():
         result = run_bot_cycle()
         placed = result["placed"]
         if not placed:
-            return jsonify({"message": f"Sin trades nuevos. Analizados {result['analyzed']}, shortlist {result['shortlisted']}, portfolio 0.", "reasoning": "Disciplina: no se forzó ninguna entrada débil."})
+            return jsonify({"message": f"Sin trades nuevos. Analizados {result['analyzed']}, shortlist {result['shortlisted']}, watchlist {result.get('watchlist', 0)}, portfolio 0.", "reasoning": "Disciplina: las oportunidades prometedoras se fueron a watchlist y no se forzó entrada floja."})
         core_count = sum(1 for bet in placed if bet.get("trade_class") == "core")
-        experimental_count = len(placed) - core_count
-        return jsonify({"message": f"Portfolio actualizado: {len(placed)} trades nuevos ({core_count} core, {experimental_count} exploratory) de {result['analyzed']} mercados analizados.", "reasoning": "; ".join([bet.get("reasoning", "") for bet in placed[:4]]), "placed": len(placed), "cycle_id": result["cycle_id"]})
+        secondary_count = sum(1 for bet in placed if bet.get("trade_class") == "secondary")
+        experimental_count = sum(1 for bet in placed if bet.get("trade_class") == "experimental")
+        return jsonify({"message": f"Portfolio actualizado: {len(placed)} trades nuevos ({core_count} core, {secondary_count} secondary, {experimental_count} exploratory) de {result['analyzed']} mercados analizados; watchlist {result.get('watchlist', 0)}.", "reasoning": "; ".join([bet.get("reasoning", "") for bet in placed[:4]]), "placed": len(placed), "cycle_id": result["cycle_id"]})
     except Exception as exc:
         logger.exception("bot cycle failed")
         return jsonify({"message": f"Error: {exc}", "reasoning": ""}), 500
@@ -1738,7 +2167,7 @@ def markets_preview():
 @app.route("/bets")
 def bets_endpoint():
     result = []
-    for bet in get_all_bets()[:20]:
+    for bet in get_current_lab_bets()[:24]:
         pnl = safe_float(bet.get("pnl"), 0.0)
         result.append({
             "question": bet.get("question"),
@@ -1747,7 +2176,7 @@ def bets_endpoint():
             "pnl": pnl,
             "pnl_text": "—" if bet.get("status") == "open" else f"{('+' if pnl > 0 else '')}{round(pnl, 2)} USDC",
             "status": bet.get("status"),
-            "status_text": {"open": "abierta", "won": "ganada", "lost": "perdida"}.get(bet.get("status"), bet.get("status")),
+            "status_text": {"open": "abierta", "won": "ganada", "lost": "perdida", "lab_reset_archived": "archivada"}.get(bet.get("status"), bet.get("status")),
             "edge": round(safe_float(bet.get("edge"), 0.0) * 100, 1),
             "confidence": bet.get("confidence", 0),
             "source_quality": round(safe_float(bet.get("source_quality_score"), 0.0) * 100, 1),
@@ -1756,7 +2185,9 @@ def bets_endpoint():
             "evidence_strength": round(safe_float(bet.get("evidence_strength"), 0.0) * 100, 1),
             "score": round(safe_float(bet.get("composite_score"), 0.0) * 100, 1),
             "opportunity_score": round(safe_float(bet.get("opportunity_score"), 0.0) * 100, 1),
+            "portfolio_priority_score": round(safe_float(bet.get("portfolio_priority_score"), 0.0) * 100, 1),
             "mispricing_score": round(safe_float(bet.get("mispricing_score"), 0.0) * 100, 1),
+            "ease_of_win": round(safe_float(bet.get("ease_of_win_score"), 0.0) * 100, 1),
             "learning_velocity": round(safe_float(bet.get("learning_velocity_score"), 0.0) * 100, 1),
             "market_learnability": round(safe_float(bet.get("market_learnability_score"), 0.0) * 100, 1),
             "reliability": round(safe_float(bet.get("conclusion_reliability_score"), 0.0) * 100, 1),
@@ -1766,9 +2197,14 @@ def bets_endpoint():
             "thesis_type": bet.get("thesis_type", "?"),
             "mispricing_type": bet.get("mispricing_type", "?"),
             "trade_class": bet.get("trade_class", "core"),
+            "tier": bet.get("tier", "TIER_C"),
+            "selection_bucket": bet.get("selection_bucket", "selected_now"),
+            "strategy_version": bet.get("strategy_version", "legacy"),
+            "lab_epoch": bet.get("lab_epoch", "legacy"),
             "key_signal": bet.get("key_signal", ""),
             "invalidation_condition": bet.get("invalidation_condition", ""),
             "time_bucket": bet.get("feedback_time_bucket", ""),
+            "horizon_bucket": bet.get("horizon_bucket", ""),
             "reasoning": bet.get("reasoning", ""),
             "prob_market": safe_float(bet.get("prob_market"), 0.0),
         })
@@ -1813,7 +2249,45 @@ def candidate_scores():
         "candidates": LAST_CYCLE_DATA["candidates"],
         "shortlist": LAST_CYCLE_DATA["shortlist"],
         "selected": LAST_CYCLE_DATA["selected"],
+        "selected_now": LAST_CYCLE_DATA["selected"],
+        "watchlist": LAST_CYCLE_DATA["watchlist"],
+        "watchlist_high_potential": LAST_CYCLE_DATA["watchlist"],
         "rejected": LAST_CYCLE_DATA["rejected"],
+        "rejected_low_quality": LAST_CYCLE_DATA["rejected"],
+    })
+
+
+@app.route("/watchlist")
+def watchlist_endpoint():
+    return jsonify({"cycle_id": LAST_CYCLE_DATA["cycle_id"], "items": LAST_CYCLE_DATA["watchlist"]})
+
+
+@app.route("/legacy-summary")
+def legacy_summary():
+    legacy_bets = get_legacy_bets()
+    return jsonify({
+        "current_lab_epoch": get_current_lab_epoch(),
+        "legacy_trades": len(legacy_bets),
+        "legacy_open_like": sum(1 for bet in legacy_bets if bet.get("status") in ("open", "lab_reset_archived")),
+        "legacy_by_status": dict(Counter(bet.get("status", "unknown") for bet in legacy_bets)),
+        "legacy_by_strategy_version": dict(Counter(bet.get("strategy_version", "legacy") for bet in legacy_bets)),
+    })
+
+
+@app.route("/portfolio-debug")
+def portfolio_debug():
+    snapshot = current_portfolio_snapshot()
+    return jsonify({
+        "current_lab_epoch": get_current_lab_epoch(),
+        "current_strategy_version": get_current_strategy_version(),
+        "core_open": snapshot["core_open"],
+        "secondary_open": snapshot["secondary_open"],
+        "experimental_open": snapshot["experimental_open"],
+        "legacy_trades_archived": len(get_legacy_bets()),
+        "exposure_by_category": snapshot["category_exposure"],
+        "exposure_by_thesis": snapshot["thesis_exposure"],
+        "exposure_by_horizon": snapshot["horizon_exposure"],
+        "exposure_by_tier": snapshot["tier_exposure"],
     })
 
 
@@ -1825,6 +2299,9 @@ def analysis_debug():
             "question": item.get("question"),
             "edge": item.get("edge"),
             "compound_score": item.get("compound_score"),
+            "portfolio_priority_score": item.get("portfolio_priority_score"),
+            "tier": item.get("tier"),
+            "horizon_bucket": item.get("horizon_bucket"),
             "conclusion_reliability_score": item.get("conclusion_reliability_score"),
             "analysis": item.get("analysis"),
             "research_packet": item.get("packet"),
@@ -1872,12 +2349,12 @@ HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e8e8e8;padding:20px;max-width:1100px;margin:0 auto}h1{font-size:20px;margin-bottom:4px}.sub{font-size:12px;color:#666;margin-bottom:18px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}.metric,.card{background:#111;border:1px solid #1f1f1f;border-radius:12px;padding:14px}.metric-label,.section-title{font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.08em}.metric-value{font-size:20px;margin-top:6px}.row{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.btn{padding:6px 14px;border-radius:8px;border:1px solid #2a2a2a;background:transparent;color:#fff;cursor:pointer}.btn-primary{background:#ececec;color:#111;border-color:#ececec}.positive{color:#4caf50}.negative{color:#f44336}.neutral{color:#999}.section-title{margin:14px 0 6px}.trade{padding:10px 0;border-bottom:1px solid #1d1d1d}.trade:last-child{border-bottom:none}.bad{color:#f44336}.good{color:#4caf50}.badge{display:inline-block;font-size:10px;padding:2px 7px;border-radius:999px;background:#1c1c1c;color:#ccc}.core{background:#0f2e0f;color:#6bd27a}.experimental{background:#2d2610;color:#e4c766}.meta{font-size:11px;color:#777;margin-top:4px;line-height:1.4}.empty{color:#666;font-size:12px}@media(max-width:700px){.metrics{grid-template-columns:repeat(2,1fr)}}
+*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e8e8e8;padding:20px;max-width:1100px;margin:0 auto}h1{font-size:20px;margin-bottom:4px}.sub{font-size:12px;color:#666;margin-bottom:18px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}.metric,.card{background:#111;border:1px solid #1f1f1f;border-radius:12px;padding:14px}.metric-label,.section-title{font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.08em}.metric-value{font-size:20px;margin-top:6px}.row{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.btn{padding:6px 14px;border-radius:8px;border:1px solid #2a2a2a;background:transparent;color:#fff;cursor:pointer}.btn-primary{background:#ececec;color:#111;border-color:#ececec}.positive{color:#4caf50}.negative{color:#f44336}.neutral{color:#999}.section-title{margin:14px 0 6px}.trade{padding:10px 0;border-bottom:1px solid #1d1d1d}.trade:last-child{border-bottom:none}.bad{color:#f44336}.good{color:#4caf50}.badge{display:inline-block;font-size:10px;padding:2px 7px;border-radius:999px;background:#1c1c1c;color:#ccc}.core{background:#0f2e0f;color:#6bd27a}.secondary{background:#10263a;color:#7bc7ff}.experimental{background:#2d2610;color:#e4c766}.meta{font-size:11px;color:#777;margin-top:4px;line-height:1.4}.empty{color:#666;font-size:12px}@media(max-width:700px){.metrics{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
 <body>
 <h1>Polymarket Research Portfolio Bot</h1>
-<div class="sub">Research packets · Claude estructurado · Portfolio allocation · Research lab</div>
+<div class="sub">Research packets · Claude estructurado · Portfolio allocation · Research lab activo</div>
 <div class="metrics">
 <div class="metric"><div class="metric-label">Capital libre</div><div class="metric-value" id="capital-free">$0</div></div>
 <div class="metric"><div class="metric-label">Capital comprometido</div><div class="metric-value" id="capital-committed">$0</div></div>
@@ -1885,7 +2362,7 @@ HTML = """<!DOCTYPE html>
 <div class="metric"><div class="metric-label">PnL total</div><div class="metric-value" id="total-pnl">$0</div></div>
 <div class="metric"><div class="metric-label">PnL realizado</div><div class="metric-value" id="realized-pnl">$0</div></div>
 <div class="metric"><div class="metric-label">PnL unrealized</div><div class="metric-value" id="unrealized-pnl">$0</div></div>
-<div class="metric"><div class="metric-label">Core / Experimental</div><div class="metric-value" id="core-exp">0 / 0</div></div>
+<div class="metric"><div class="metric-label">Core / Secondary / Exploratory</div><div class="metric-value" id="core-exp">0 / 0 / 0</div></div>
 <div class="metric"><div class="metric-label">Analizados / Portfolio</div><div class="metric-value" id="cycle-stats">0 / 0</div></div>
 </div>
 <div class="card">
@@ -1898,8 +2375,8 @@ HTML = """<!DOCTYPE html>
 <div class="card" id="insights"><div class="empty">Cargando...</div></div>
 <script>
 function colorize(el, value){el.className='metric-value '+(value>0?'positive':value<0?'negative':'neutral');}
-async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('capital-free').textContent='$'+Math.round(d.capital_free||0);document.getElementById('capital-committed').textContent='$'+Math.round(d.capital_committed||0);document.getElementById('portfolio-exposure').textContent=Math.round((d.portfolio_exposure||0)*100)+'%';const tp=document.getElementById('total-pnl');tp.textContent=(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0);colorize(tp,d.total_pnl||0);const rp=document.getElementById('realized-pnl');rp.textContent=(d.realized_pnl>=0?'+':'')+Math.round(d.realized_pnl||0);colorize(rp,d.realized_pnl||0);const up=document.getElementById('unrealized-pnl');up.textContent=(d.unrealized_pnl>=0?'+':'')+Math.round(d.unrealized_pnl||0);colorize(up,d.unrealized_pnl||0);document.getElementById('core-exp').textContent=(d.core_open||0)+' / '+(d.experimental_open||0);document.getElementById('cycle-stats').textContent=(d.markets_analyzed_last_cycle||0)+' / '+(d.positions_per_cycle_last||0);document.getElementById('insights').innerHTML=`<div class='meta'>Exposure categoría: ${JSON.stringify(d.portfolio_exposure_by_category||{})}</div><div class='meta'>Exposure thesis: ${JSON.stringify(d.portfolio_exposure_by_thesis_type||{})}</div><div class='meta'>PnL por categoría: ${JSON.stringify(d.pnl_by_category||{})}</div><div class='meta'>PnL por mispricing: ${JSON.stringify(d.performance_by_mispricing_type||{})}</div><div class='meta'>Winrate confidence: ${JSON.stringify(d.winrate_by_confidence_bucket||{})}</div><div class='meta'>Winrate edge: ${JSON.stringify(d.winrate_by_edge_bucket||{})}</div><div class='meta'>Winrate learning velocity: ${JSON.stringify(d.winrate_by_learning_velocity||{})}</div><div class='meta'>Winrate time bucket: ${JSON.stringify(d.winrate_by_time_to_resolution_bucket||{})}</div><div class='meta'>Core vs exploratory: ${JSON.stringify(d.winrate_core_vs_exploratory||{})}</div><div class='meta'>Feedback temprano: ${d.early_feedback_pct||0}% · capital reciclado: $${Math.round(d.capital_reused_by_early_closure||0)} · hold medio: ${d.average_hold_time_hours||0}h · pnl/día proxy: ${d.pnl_per_day_proxy||0}</div><div class='meta'>Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}</div><div class='meta'>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}</div><div class='meta'>Descartados por evidencia: ${d.discarded_low_evidence_last_cycle||0} · por correlación/exposure: ${d.discarded_correlation_last_cycle||0}</div>`;}
-async function loadBets(){const d=await fetch('/bets').then(r=>r.json());if(!d.length){document.getElementById('bets').innerHTML="<div class='empty'>Sin apuestas todavía.</div>";return;}document.getElementById('bets').innerHTML=d.map(b=>`<div class='trade'><div class='row'><div style='font-size:13px;flex:1'>${b.question}</div><div><span class='badge ${b.trade_class}'>${b.trade_class}</span> <span class='badge'>${b.category}</span> <span class='badge'>${b.mispricing_type}</span></div></div><div class='meta'>${b.side} · $${b.amount} · opp ${b.opportunity_score} · mispricing ${b.mispricing_score} · edge ${b.edge}pp · reliability ${b.reliability} · learn vel ${b.learning_velocity} · learnability ${b.market_learnability}</div><div class='meta'>conf ${b.confidence}/10 · sourceQ ${b.source_quality} · evidence ${b.evidence_strength} · contradictions ${b.contradictions} · uncertainty ${b.uncertainty} · bucket ${b.time_bucket||'—'}</div><div class='meta'>Señal clave: ${b.key_signal||'—'} · invalidación: ${b.invalidation_condition||'—'}</div><div class='meta'>${b.status_text} · ${b.pnl_text} · ${b.reasoning}</div></div>`).join('');}
+async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('capital-free').textContent='$'+Math.round(d.capital_free||0);document.getElementById('capital-committed').textContent='$'+Math.round(d.capital_committed||0);document.getElementById('portfolio-exposure').textContent=Math.round((d.portfolio_exposure||0)*100)+'%';const tp=document.getElementById('total-pnl');tp.textContent=(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0);colorize(tp,d.total_pnl||0);const rp=document.getElementById('realized-pnl');rp.textContent=(d.realized_pnl>=0?'+':'')+Math.round(d.realized_pnl||0);colorize(rp,d.realized_pnl||0);const up=document.getElementById('unrealized-pnl');up.textContent=(d.unrealized_pnl>=0?'+':'')+Math.round(d.unrealized_pnl||0);colorize(up,d.unrealized_pnl||0);document.getElementById('core-exp').textContent=(d.core_open||0)+' / '+(d.secondary_open||0)+' / '+(d.experimental_open||0);document.getElementById('cycle-stats').textContent=(d.markets_analyzed_last_cycle||0)+' / '+(d.positions_per_cycle_last||0);document.getElementById('insights').innerHTML=`<div class='meta'>Lab actual: ${d.current_lab_epoch||'—'} · strategy ${d.current_strategy_version||'—'} · bankroll inicial ${Math.round(d.paper_starting_balance||0)} · legacy archivados ${d.legacy_trades_archived||0}</div><div class='meta'>Exposure categoría: ${JSON.stringify(d.portfolio_exposure_by_category||{})}</div><div class='meta'>Exposure thesis: ${JSON.stringify(d.portfolio_exposure_by_thesis_type||{})}</div><div class='meta'>Exposure tier: ${JSON.stringify(d.portfolio_exposure_by_tier||{})} · horizon: ${JSON.stringify(d.portfolio_exposure_by_horizon||{})}</div><div class='meta'>PnL por categoría: ${JSON.stringify(d.pnl_by_category||{})}</div><div class='meta'>PnL por tier: ${JSON.stringify(d.pnl_by_tier||{})} · por mispricing: ${JSON.stringify(d.performance_by_mispricing_type||{})}</div><div class='meta'>Winrate confidence: ${JSON.stringify(d.winrate_by_confidence_bucket||{})}</div><div class='meta'>Winrate edge: ${JSON.stringify(d.winrate_by_edge_bucket||{})}</div><div class='meta'>Winrate learning velocity: ${JSON.stringify(d.winrate_by_learning_velocity||{})}</div><div class='meta'>Winrate time bucket: ${JSON.stringify(d.winrate_by_time_to_resolution_bucket||{})}</div><div class='meta'>Core/secondary/exploratory: ${JSON.stringify(d.winrate_core_vs_exploratory||{})}</div><div class='meta'>Feedback temprano: ${d.early_feedback_pct||0}% · capital reciclado: $${Math.round(d.capital_reused_by_early_closure||0)} · hold medio: ${d.average_hold_time_hours||0}h · pnl/día proxy: ${d.pnl_per_day_proxy||0}</div><div class='meta'>Último ciclo: selected core ${d.selected_core_last_cycle||0}, secondary ${d.selected_secondary_last_cycle||0}, exploratory ${d.selected_exploratory_last_cycle||0}, watchlist ${d.watchlist_last_cycle||0} · avg bets/cycle ${d.average_bets_per_cycle||0}</div><div class='meta'>Coverage breadth: ${d.coverage_breadth||0} · overlap concentration: ${Math.round((d.overlap_concentration||0)*100)}% · capital efficiency: ${Math.round((d.capital_efficiency||0)*100)}%</div><div class='meta'>Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}</div><div class='meta'>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}</div><div class='meta'>Descartados por evidencia: ${d.discarded_low_evidence_last_cycle||0} · por correlación/exposure: ${d.discarded_correlation_last_cycle||0}</div>`;}
+async function loadBets(){const d=await fetch('/bets').then(r=>r.json());if(!d.length){document.getElementById('bets').innerHTML="<div class='empty'>Sin apuestas todavía.</div>";return;}document.getElementById('bets').innerHTML=d.map(b=>`<div class='trade'><div class='row'><div style='font-size:13px;flex:1'>${b.question}</div><div><span class='badge ${b.trade_class}'>${b.trade_class}</span> <span class='badge'>${b.tier}</span> <span class='badge'>${b.category}</span> <span class='badge'>${b.mispricing_type}</span></div></div><div class='meta'>${b.side} · $${b.amount} · priority ${b.portfolio_priority_score} · opp ${b.opportunity_score} · ease ${b.ease_of_win} · mispricing ${b.mispricing_score} · edge ${b.edge}pp</div><div class='meta'>reliability ${b.reliability} · learn vel ${b.learning_velocity} · learnability ${b.market_learnability} · horizon ${b.horizon_bucket||'—'} · feedback ${b.time_bucket||'—'}</div><div class='meta'>conf ${b.confidence}/10 · sourceQ ${b.source_quality} · evidence ${b.evidence_strength} · contradictions ${b.contradictions} · uncertainty ${b.uncertainty}</div><div class='meta'>Lab ${b.lab_epoch||'—'} · strategy ${b.strategy_version||'—'} · señal clave: ${b.key_signal||'—'} · invalidación: ${b.invalidation_condition||'—'} · bucket ${b.selection_bucket||'selected_now'}</div><div class='meta'>${b.status_text} · ${b.pnl_text} · ${b.reasoning}</div></div>`).join('');}
 async function runCycle(){document.getElementById('bot-status').textContent='Investigando mercados y armando portfolio...';const d=await fetch('/bot-bet',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.message||'Ciclo ejecutado';document.getElementById('bot-reasoning').textContent=d.reasoning||'';await loadAll();}
 async function doMonitor(){document.getElementById('bot-status').textContent='Monitoreando portfolio...';const d=await fetch('/monitor',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.message||'Monitor ejecutado';await loadAll();}
 async function loadAll(){await loadMetrics();await loadBets();}
@@ -1923,16 +2400,63 @@ def setup_db():
 @app.route("/clear-open", methods=["POST"])
 def clear_open():
     try:
+        current_epoch = get_current_lab_epoch()
         open_bets = get_open_bets()
-        refund = sum(safe_float(bet.get("amount"), 0.0) for bet in open_bets)
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM bets WHERE status='open'")
-        if refund:
-            set_state("balance", get_state("balance", DEFAULT_BALANCE) + refund)
-        return jsonify({"ok": True, "message": f"Se eliminaron {len(open_bets)} apuestas abiertas y se devolvieron ${round(refund, 2)} al balance"})
+        refund = round(sum(safe_float(bet.get("amount"), 0.0) for bet in open_bets), 2)
+        if open_bets:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE bets
+                        SET status='lab_reset_archived',
+                            active_lab=FALSE,
+                            selection_bucket='legacy_archive',
+                            resolved_reason='clear_open_archive',
+                            resolved_at=NOW()
+                        WHERE lab_epoch=%s AND status='open'
+                        """,
+                        (current_epoch,),
+                    )
+            set_state("balance", get_state("balance", get_paper_starting_balance()) + refund)
+        return jsonify({"ok": True, "message": f"Se archivaron {len(open_bets)} apuestas abiertas del lab actual y se devolvieron ${refund} al balance operativo", "lab_epoch": current_epoch, "refund": refund})
     except Exception as exc:
         logger.exception("clear_open failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/lab-reset", methods=["POST"])
+def lab_reset():
+    try:
+        payload = request.get_json(silent=True) or {}
+        requested_balance = safe_float(payload.get("balance", request.args.get("balance", get_paper_starting_balance())), get_paper_starting_balance())
+        result = archive_current_lab_and_reset(balance=requested_balance)
+        return jsonify({
+            "ok": True,
+            "message": f"Lab reseteado. Epoch anterior {result['previous_lab_epoch']} archivado; nuevo epoch {result['lab_epoch']} con balance ${round(result['balance'], 2)}.",
+            "archived_total": result["archived_total"],
+            "archived_open": result["archived_open"],
+            "refund": result["refund"],
+            "current_lab_epoch": result["lab_epoch"],
+            "strategy_version": CURRENT_STRATEGY_VERSION,
+        })
+    except Exception as exc:
+        logger.exception("lab_reset failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/fund-paper", methods=["POST"])
+def fund_paper():
+    try:
+        payload = request.get_json(silent=True) or {}
+        amount = safe_float(payload.get("amount", request.args.get("amount", 0.0)), 0.0)
+        if amount <= 0:
+            return jsonify({"ok": False, "error": "amount debe ser > 0"}), 400
+        new_balance = round(get_state("balance", get_paper_starting_balance()) + amount, 2)
+        set_state("balance", new_balance)
+        return jsonify({"ok": True, "message": f"Se agregaron ${round(amount, 2)} al bankroll paper.", "amount_added": round(amount, 2), "new_balance": new_balance, "current_lab_epoch": get_current_lab_epoch()})
+    except Exception as exc:
+        logger.exception("fund_paper failed")
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
