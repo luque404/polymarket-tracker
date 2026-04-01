@@ -1,1269 +1,1827 @@
-# ============================================================
-# POLYMARKET PAPER TRADING BOT v2.0
-# Arquitectura: Signal Aggregator → Dual Claude → Kelly → DB
-# ============================================================
+from __future__ import annotations
 
-from flask import Flask, jsonify, render_template_string, request
-import requests
-import json
 import os
-import threading
-import time
 import re
-import math
-from datetime import datetime, timezone, timedelta
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from dataclasses import dataclass, field
+from typing import List
+
+from flask import Flask, jsonify, request, render_template_string, Response
 
 app = Flask(__name__)
 
-# ── ENV ──────────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-DATABASE_URL      = os.environ.get("DATABASE_URL", "")
-NEWS_API_KEY      = os.environ.get("NEWS_API_KEY", "")
-METACULUS_API_KEY = os.environ.get("METACULUS_API_KEY", "")
-REDDIT_CLIENT_ID  = os.environ.get("REDDIT_CLIENT_ID", "")
-REDDIT_SECRET     = os.environ.get("REDDIT_SECRET", "")
+# =========================
+# Configuración básica
+# =========================
+BRAND_NAME = os.getenv("BRAND_NAME", "Nivora")
+PRIMARY_COLOR = os.getenv("PRIMARY_COLOR", "#0f172a")
+SECONDARY_COLOR = os.getenv("SECONDARY_COLOR", "#06b6d4")
+SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "hola@nivora.ai")
+INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "https://instagram.com/nivora.ai")
+WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "")
 
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API  = "https://clob.polymarket.com"
 
-SPORTS_FILTER = [
-    "soccer", "football", "nfl", "nba", "nhl", "mlb",
-    "basketball", "tennis", "golf", "cricket", "rugby",
-    "f1 race", "racing", "olympics", "world cup", "fifa",
-    "premier league", "bundesliga", "ligue 1", "la liga",
-    "ucl", "ufc", "boxing", "wrestling", "nascar",
-    "formula 1", "grand prix", "playoff", "serie a",
-    "nfl draft", "nba draft", "nfl draft", "nba draft", "champions league", "europa league", "champions"
+@dataclass
+class FAQ:
+    key: str
+    title: str
+    answer: str
+    keywords: List[str]
+    follow_ups: List[str] = field(default_factory=list)
+
+
+FAQS: List[FAQ] = [
+    FAQ(
+        key="envio_simple",
+        title="¿Cuánto tarda la implementación?",
+        answer=(
+            "La implementación suele tardar entre 24 y 72 horas 👍\n\n"
+            "Depende del plan elegido y de la complejidad de tu tienda, pero la idea es dejarlo funcionando lo antes posible para que puedas empezar a usarlo sin demoras.\n\n"
+            "Si querés, también podés ver qué plan se adapta mejor a tu tienda en la pestaña Precios."
+        ),
+        keywords=["cuanto tarda", "cuánto tarda", "cuanto demora", "cuánto demora", "en cuanto tiempo esta", "en cuánto tiempo está", "implementacion", "activacion", "integracion"],
+        follow_ups=["Precios"],
+    ),
+    FAQ(
+        key="stock_simple",
+        title="¿Está disponible para mi tienda?",
+        answer=(
+            "Sí, Nivora se puede implementar sin problema 👍\n\n"
+            "La idea es adaptarlo a tu tienda para que empiece a responder con criterio y te ayude a vender mejor.\n\n"
+            "Si querés, te contamos cuál encaja mejor según tu caso."
+        ),
+        keywords=["tenes stock", "tenés stock", "hay stock", "stock", "disponible", "esta disponible", "está disponible", "lo puedo implementar"],
+        follow_ups=["¿Cómo funciona en una tienda?"],
+    ),
+    FAQ(
+        key="uso_simple",
+        title="¿Cómo funciona?",
+        answer=(
+            "Funciona como un asistente que responde dudas reales de tus clientes dentro de tu tienda 😊\n\n"
+            "La idea es acompañar la compra, resolver objeciones en el momento y hacer que más personas avancen sin depender de atención manual."
+        ),
+        keywords=["como se usa", "cómo se usa", "uso", "como funciona", "cómo funciona", "funcionamiento"],
+        follow_ups=["¿Qué tipo de preguntas responde?"],
+    ),
+    FAQ(
+        key="cambios_simple",
+        title="¿Qué tipo de dudas puede resolver?",
+        answer=(
+            "Puede resolver dudas frecuentes como implementación, planes, integración, personalización y consultas comunes que hoy suelen frenar la decisión 👍\n\n"
+            "La idea es sacar fricción en el momento justo para que la conversación avance y no se pierdan oportunidades."
+        ),
+        keywords=["dudas frecuentes", "que dudas resuelve", "qué dudas resuelve", "que consultas resuelve", "qué consultas resuelve"],
+        follow_ups=["¿Qué tipo de preguntas responde?"],
+    ),
+    FAQ(
+        key="caso_simple",
+        title="¿Sirve para mi caso?",
+        answer=(
+            "Depende del caso, pero en la mayoría de situaciones funciona muy bien 😊\n\n"
+            "Si querés, contame un poco más y te oriento mejor."
+        ),
+        keywords=["sirve para mi caso", "sirve para mi", "sirve para este caso", "me sirve", "sirve"],
+        follow_ups=["¿Qué tipo de preguntas responde?"],
+    ),
+    FAQ(
+        key="funcionamiento",
+        title="¿Cómo funciona en una tienda?",
+        answer=(
+            "Funciona de forma muy simple.\n\n"
+            "La persona entra a tu tienda, hace una pregunta desde el chat y el asistente responde al instante con información de tus productos, envíos, cambios, medios de pago o dudas frecuentes.\n\n"
+            "Eso ayuda a sacar fricción justo en el momento en que la venta todavía se está decidiendo.\n\n"
+            "Si querés, también puedo mostrarte qué tipo de preguntas responde en una tienda real."
+        ),
+        keywords=["como funciona", "como funciona en una tienda", "cómo funciona", "funciona en una tienda", "como trabaja", "como responde"],
+        follow_ups=["¿Qué tipo de preguntas responde?", "¿Qué beneficios tiene?"],
+    ),
+    FAQ(
+        key="preguntas",
+        title="¿Qué tipo de preguntas responde?",
+        answer=(
+            "Puedo responder dudas comunes de clientes como tiempos de implementación, precios, funcionamiento, integración, personalización del bot y preguntas frecuentes que ayudan a decidir mejor.\n\n"
+            "La idea es acompañar la compra, resolver objeciones en el momento y hacer que más personas avancen sin necesitar atención manual.\n\n"
+            "Si querés, también puedo mostrarte cómo se adapta a tu tipo de tienda."
+        ),
+        keywords=["que tipo de preguntas responde", "qué tipo de preguntas responde", "que puede responder", "qué puede responder", "que tipo de dudas responde", "qué dudas responde", "que consultas responde", "qué consultas responde", "preguntas frecuentes", "faq", "responde preguntas"],
+        follow_ups=["¿Se puede adaptar a mi negocio?"],
+    ),
+    FAQ(
+        key="shopify",
+        title="¿Se instala en Shopify?",
+        answer=(
+            "Sí, se puede instalar en Shopify sin problema.\n\n"
+            "De hecho, es uno de los escenarios más comunes para Nivora porque muchas tiendas necesitan responder rápido sin depender del celular o del equipo de soporte.\n\n"
+            "La implementación está pensada para que sea simple, ordenada y acompañada de principio a fin."
+        ),
+        keywords=["shopify", "se instala en shopify", "sirve para shopify", "funciona con shopify", "tienda shopify"],
+        follow_ups=["¿Tengo que saber programar?", "¿Es difícil de instalar?"],
+    ),
+    FAQ(
+        key="instalacion",
+        title="¿Es difícil de instalar?",
+        answer=(
+            "No, la idea es justamente lo contrario: que sea simple.\n\n"
+            "Nivora se integra rápido sobre tu tienda actual, sin que tengas que desarrollar un sistema aparte ni ocuparte de lo técnico.\n\n"
+            "Además, la configuración inicial se adapta a tu negocio para que el asistente ya salga respondiendo con criterio desde el comienzo."
+        ),
+        keywords=["instalacion", "instalación", "es dificil de instalar", "es dificil", "cuanto tarda instalar", "implementacion", "implementación"],
+        follow_ups=["¿Tengo que saber programar?", "¿Funciona con mi tienda?"],
+    ),
+    FAQ(
+        key="tiempo_implementacion",
+        title="¿Cuánto tarda la implementación?",
+        answer=(
+            "La implementación suele tardar entre 24 y 72 horas 👍\n\n"
+            "Depende del plan elegido y de la complejidad de tu tienda, pero la idea es dejarlo funcionando lo antes posible para que puedas empezar a usarlo sin demoras.\n\n"
+            "Si querés, también podés ver qué plan se adapta mejor a tu tienda en la pestaña Precios."
+        ),
+        keywords=[
+            "cuanto tarda",
+            "cuánto tarda",
+            "cuanto demora",
+            "cuánto demora",
+            "en cuanto tiempo",
+            "en cuánto tiempo",
+            "cuando estaria",
+            "cuándo estaría",
+            "tiempo de implementacion",
+            "tiempo de implementación",
+            "tiempo de instalacion",
+            "tiempo de instalación",
+            "cuando estaria listo",
+            "cuándo estaría listo",
+        ],
+        follow_ups=["¿Es difícil de instalar?", "¿Tengo que saber programar?"],
+    ),
+    FAQ(
+        key="programar",
+        title="¿Tengo que saber programar?",
+        answer=(
+            "No hace falta que sepas programar.\n\n"
+            "Nosotros nos encargamos de dejar el asistente configurado e integrado según lo que necesite tu tienda.\n\n"
+            "Además, si más adelante querés ajustar respuestas, tono o preguntas frecuentes, también se puede ir adaptando."
+        ),
+        keywords=["no se programar", "no sé programar", "tengo que saber programar", "programar", "codigo", "código", "tecnico", "técnico"],
+        follow_ups=["¿Es difícil de instalar?", "¿Se instala en Shopify?"],
+    ),
+    FAQ(
+        key="adaptacion",
+        title="¿Se puede adaptar a mi negocio?",
+        answer=(
+            "Sí, se puede adaptar a todo tipo de tiendas 👍\n\n"
+            "El asistente se configura según tu tipo de producto, tu forma de vender y las consultas reales que recibís.\n\n"
+            "La idea es que se sienta útil, claro y alineado con tu negocio desde el primer día."
+        ),
+        keywords=["se puede adaptar", "adaptar a mi negocio", "mi negocio", "personalizar", "personalizado", "custom", "customizar", "marca", "tono"],
+        follow_ups=["¿Qué beneficios tiene?", "¿Qué pasa si quiero cambiar respuestas después?"],
+    ),
+    FAQ(
+        key="personalizacion_tono",
+        title="¿Se puede personalizar cómo responde el bot?",
+        answer=(
+            "Sí, totalmente 👍\n\n"
+            "El bot se adapta al estilo de tu tienda: más formal, más cercano o más vendedor, según lo que necesites.\n\n"
+            "La idea es que acompañe a tus clientes y los ayude a decidir, manteniendo tu forma de comunicar."
+        ),
+        keywords=["tono", "personalidad", "forma de responder", "mas amable", "más amable", "adaptar", "personalizado", "personalizar", "como responde", "cómo responde"],
+        follow_ups=["¿Se puede adaptar a mi negocio?", "¿Qué tipo de preguntas responde?"],
+    ),
+    FAQ(
+        key="beneficios",
+        title="¿Qué beneficios tiene?",
+        answer=(
+            "Los beneficios más claros suelen ser estos:\n\n"
+            "• responde consultas al instante\n"
+            "• reduce fricción antes de decidir\n"
+            "• baja la carga manual del equipo\n"
+            "• acompaña mejor al cliente\n"
+            "• ayuda a recuperar ventas que hoy se pierden por no responder a tiempo\n\n"
+            "En resumen: más claridad para quien evalúa comprar y menos esfuerzo para tu negocio 👍"
+        ),
+        keywords=["beneficios", "ventajas", "para que sirve", "para qué sirve", "que gano", "qué gano", "vale la pena", "retorno"],
+        follow_ups=["¿Vale la pena?", "¿Se puede adaptar a mi negocio?"],
+    ),
+    FAQ(
+        key="cambios",
+        title="¿Qué pasa si quiero cambiar respuestas después?",
+        answer=(
+            "Se puede ajustar sin problema.\n\n"
+            "Si querés cambiar respuestas, sumar información nueva, actualizar políticas o adaptar el tono, el sistema se puede ir mejorando con el tiempo.\n\n"
+            "La idea no es dejarte un bot rígido, sino una solución que acompañe cómo evoluciona tu tienda."
+        ),
+        keywords=["cambiar respuestas", "editar respuestas", "modificar respuestas", "actualizar respuestas", "cambiar despues", "cambiar después"],
+        follow_ups=["¿Se puede adaptar a mi negocio?", "¿Tengo soporte?"],
+    ),
+    FAQ(
+        key="otras_plataformas",
+        title="¿Solo sirve para Shopify?",
+        answer=(
+            "No. Shopify es un caso muy común, pero Nivora no se limita a una sola plataforma.\n\n"
+            "Si ya tenés una tienda funcionando, en la mayoría de los casos se puede evaluar cómo integrarlo sin volver complejo el proceso.\n\n"
+            "Si querés, puedo orientarte para ver si aplica bien a tu caso."
+        ),
+        keywords=["solo shopify", "solo sirve para shopify", "otra plataforma", "woocommerce", "tienda nube", "tiendanube", "solo funciona en shopify"],
+        follow_ups=["¿Funciona con mi tienda?", "Hablar por WhatsApp"],
+    ),
+    FAQ(
+        key="sirve_para_mi_tienda",
+        title="¿Sirve para mi tienda?",
+        answer=(
+            "Sí, se puede adaptar a todo tipo de tiendas 👍\n\n"
+            "Se configura según lo que vendés, cómo atendés y las dudas reales que suelen aparecer antes de comprar.\n\n"
+            "La idea es que se sienta natural para tu marca y útil para tus clientes."
+        ),
+        keywords=["sirve para mi tienda", "sirve para mi ecommerce", "me sirve", "aplica para mi tienda", "funciona con mi tienda"],
+        follow_ups=["¿Qué beneficios tiene?", "¿Es difícil de instalar?"],
+    ),
+    FAQ(
+        key="precio",
+        title="¿Cuánto cuesta?",
+        answer=(
+            "El valor depende del nivel de personalización que necesite tu tienda.\n\n"
+            "Trabajamos con planes simples que se adaptan a cada negocio.\n\n"
+            "Además, ofrecemos una garantía de 7 días: si dentro de ese período no te resulta útil, podés solicitar la devolución.\n\n"
+            "Si querés, podemos orientarte con la opción más adecuada según tu caso."
+        ),
+        keywords=["precio", "cual es el precio", "cuál es el precio", "cuanto cuesta", "cuánto cuesta", "cuanto sale", "cuánto sale", "cuanto vale", "cuánto vale", "plan", "planes", "costo", "costos", "mensual", "valor", "inversion", "inversión", "sale"],
+        follow_ups=["¿Tiene garantía?", "Hablar por WhatsApp"],
+    ),
+    FAQ(
+        key="ia",
+        title="¿Es como ChatGPT?",
+        answer=(
+            "No exactamente.\n\n"
+            "Aunque utiliza lógica similar, este asistente está pensado específicamente para tu negocio.\n\n"
+            "No responde de forma genérica, sino que se configura con información real de tu tienda para responder de manera clara, coherente y útil para tus clientes.\n\n"
+            "La idea es que funcione como un asistente de atención, no como una IA abierta."
+        ),
+        keywords=["es como chatgpt", "es ia", "es inteligencia artificial", "funciona como una ia", "funciona como una inteligencia artificial", "chatgpt"],
+        follow_ups=["¿Se puede adaptar a mi negocio?", "¿Qué tipo de preguntas responde?"],
+    ),
+    FAQ(
+        key="garantia",
+        title="¿Tiene garantía?",
+        answer=(
+            "Sí, ofrecemos una garantía de 7 días.\n\n"
+            "Si dentro de ese período sentís que no te aporta valor, podés solicitar la devolución.\n\n"
+            "La idea es que pruebes el sistema en tu tienda con tranquilidad."
+        ),
+        keywords=["garantia", "garantía", "tiene garantia", "tiene garantía", "y si no me sirve", "puedo cancelar", "riesgo", "sin riesgo", "devolucion", "devolución"],
+        follow_ups=["¿Cuánto cuesta?", "Hablar por WhatsApp"],
+    ),
+    FAQ(
+        key="vale_la_pena",
+        title="¿Vale la pena?",
+        answer=(
+            "Sí, totalmente.\n\n"
+            "Este tipo de asistente ayuda a responder consultas en el momento, acompaña al cliente durante la compra y evita que se pierdan ventas por falta de respuesta.\n\n"
+            "Además, reduce la necesidad de estar pendiente del chat todo el tiempo o de contratar atención manual para preguntas repetidas.\n\n"
+            "La idea es mejorar la experiencia del cliente y hacer más eficiente la atención sin agregar complejidad."
+        ),
+        keywords=["vale la pena", "conviene", "retorno", "roi", "sirve de verdad", "funciona de verdad"],
+        follow_ups=["¿Qué beneficios tiene?", "Hablar por WhatsApp"],
+    ),
+    FAQ(
+        key="demo",
+        title="Quiero una demo",
+        answer=(
+            "Una demo ayuda mucho a visualizar cómo respondería el asistente en tu caso y qué tipo de consultas podría automatizar.\n\n"
+            "Así podés imaginarlo dentro de tu tienda antes de tomar una decisión.\n\n"
+            "Si querés, compartime tu duda principal y te muestro por dónde empezaría."
+        ),
+        keywords=["demo", "quiero una demo", "agendar demo", "ver demo", "mostrar demo", "probar demo"],
+        follow_ups=["¿Cómo funciona en una tienda?", "Hablar por WhatsApp"],
+    ),
+    FAQ(
+        key="soporte",
+        title="¿Tengo soporte?",
+        answer=(
+            "Sí. La idea es que no te quedes solo con una herramienta, sino con una solución acompañada.\n\n"
+            "Si necesitás ajustes, ayuda o querés revisar cómo está respondiendo, hay soporte para que el sistema siga funcionando bien y alineado con tu negocio."
+        ),
+        keywords=["soporte", "acompanamiento", "acompañamiento", "ayuda", "me ayudan", "asistencia"],
+        follow_ups=["¿Qué pasa si quiero cambiar respuestas después?", "Hablar por WhatsApp"],
+    ),
 ]
 
-# ── DB ───────────────────────────────────────────────────────
-def get_db():
-    return psycopg2.connect(DATABASE_URL)
+BASE_QUICK_REPLIES = ["¿Qué tipo de preguntas responde?"]
 
-def init_db():
-    if not DATABASE_URL:
-        return
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS bets (
-                id TEXT PRIMARY KEY,
-                question TEXT,
-                side TEXT,
-                amount REAL,
-                prob REAL,
-                status TEXT,
-                pnl REAL
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS state (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
-        cur.execute("INSERT INTO state (key, value) VALUES ('balance', '10000.0') ON CONFLICT DO NOTHING")
-        cur.execute("INSERT INTO state (key, value) VALUES ('won', '0') ON CONFLICT DO NOTHING")
-        cur.execute("INSERT INTO state (key, value) VALUES ('lost', '0') ON CONFLICT DO NOTHING")
-        conn.commit()
-        cur.close()
-        conn.close()
-    except:
-        pass
-init_db()
+GREETING = "Hola 👋 ¿En qué puedo ayudarte?"
 
-def get_state(key, default=0.0):
-    try:
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("SELECT value FROM state WHERE key=%s",(key,))
-        row = cur.fetchone()
-        cur.close(); conn.close()
-        return float(row[0]) if row else default
-    except: return default
+FALLBACK = (
+    "No tengo una respuesta precisa para eso en este demo 😊\n\n"
+    "Pero sí puedo ayudarte con temas como implementación, precios, funcionamiento, integración o cómo se adapta Nivora a una tienda."
+)
 
-def set_state(key, value):
-    try:
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("INSERT INTO state(key,value) VALUES(%s,%s) ON CONFLICT(key) DO UPDATE SET value=%s",
-                    (key,str(value),str(value)))
-        conn.commit(); cur.close(); conn.close()
-    except: pass
+ARGENTINA_LOCATIONS = [
+    ("tucuman", "Tucumán"),
+    ("cordoba", "Córdoba"),
+    ("mendoza", "Mendoza"),
+    ("santa fe", "Santa Fe"),
+    ("buenos aires", "Buenos Aires"),
+    ("salta", "Salta"),
+    ("neuquen", "Neuquén"),
+    ("misiones", "Misiones"),
+    ("chaco", "Chaco"),
+    ("corrientes", "Corrientes"),
+    ("entre rios", "Entre Ríos"),
+    ("jujuy", "Jujuy"),
+    ("san juan", "San Juan"),
+    ("san luis", "San Luis"),
+    ("la pampa", "La Pampa"),
+    ("rio negro", "Río Negro"),
+    ("santiago del estero", "Santiago del Estero"),
+    ("formosa", "Formosa"),
+    ("catamarca", "Catamarca"),
+    ("la rioja", "La Rioja"),
+    ("chubut", "Chubut"),
+    ("santa cruz", "Santa Cruz"),
+    ("tierra del fuego", "Tierra del Fuego"),
+    ("rosario", "Rosario"),
+    ("mar del plata", "Mar del Plata"),
+    ("la plata", "La Plata"),
+    ("bahia blanca", "Bahía Blanca"),
+]
 
-def get_all_bets():
-    try:
-        conn = get_db(); cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT * FROM bets ORDER BY id DESC")
-        rows = cur.fetchall(); cur.close(); conn.close()
-        return [dict(r) for r in rows]
-    except: return []
+INTERNATIONAL_COUNTRIES = [
+    ("uruguay", "Uruguay"),
+    ("brasil", "Brasil"),
+    ("brazil", "Brasil"),
+    ("chile", "Chile"),
+    ("ecuador", "Ecuador"),
+    ("espana", "España"),
+    ("españa", "España"),
+    ("mexico", "México"),
+    ("méxico", "México"),
+    ("colombia", "Colombia"),
+    ("estados unidos", "Estados Unidos"),
+    ("usa", "Estados Unidos"),
+    ("eeuu", "Estados Unidos"),
+    ("canada", "Canadá"),
+    ("canadá", "Canadá"),
+    ("alemania", "Alemania"),
+    ("italia", "Italia"),
+    ("francia", "Francia"),
+    ("portugal", "Portugal"),
+    ("paraguay", "Paraguay"),
+    ("bolivia", "Bolivia"),
+    ("peru", "Perú"),
+    ("perú", "Perú"),
+]
 
-def save_bet(bet):
-    try:
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO bets
-                (id, question, market_id, side, amount, prob_market, prob_claude,
-                 edge, confidence, kelly_f, status, pnl, reasoning, sources_used,
-                 price_entry, price_current)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (id) DO UPDATE SET
-                status=EXCLUDED.status, pnl=EXCLUDED.pnl
-        """, (
-            bet["id"], bet["question"], bet.get("market_id",""),
-            bet["side"], bet["amount"],
-            bet.get("prob_market", 0.5), bet.get("prob_claude", 0.5),
-            bet.get("edge", 0), bet.get("confidence", 5),
-            bet.get("kelly_f", 0.03), bet["status"], bet["pnl"],
-            bet.get("reasoning",""), bet.get("sources_used",""),
-            bet.get("price_entry", 0.5), bet.get("price_current", 0.5)
-        ))
-        conn.commit(); cur.close(); conn.close()
-    except Exception as e:
-        print(f"[save_bet error] {e}")
+INTENT_PRIORITY = [
+    "charla_basica",
+    "saludo",
+    "tipo_de_preguntas_que_responde",
+    "implementacion_nivora",
+    "consultas_internacionales",
+    "envio_por_ubicacion",
+    "precio",
+    "funciona_realmente",
+    "tipo_de_tienda",
+    "personalizacion_bot",
+    "uso",
+    "cambios",
+    "stock",
+    "agradecimiento",
+    "desconocido",
+]
 
-def update_bet_price(bet_id, price_current, status=None, pnl=None,
-                     take_profit_hit=False, stop_loss_hit=False):
-    try:
-        conn = get_db(); cur = conn.cursor()
-        updates = ["price_current=%s"]
-        vals    = [price_current]
-        if status:
-            updates += ["status=%s","resolved_at=NOW()"]
-            vals.append(status)
-        if pnl is not None:
-            updates.append("pnl=%s"); vals.append(pnl)
-        if take_profit_hit:
-            updates.append("take_profit_hit=TRUE")
-        if stop_loss_hit:
-            updates.append("stop_loss_hit=TRUE")
-        vals.append(bet_id)
-        cur.execute(f"UPDATE bets SET {','.join(updates)} WHERE id=%s", vals)
-        conn.commit(); cur.close(); conn.close()
-    except Exception as e:
-        print(f"[update_bet_price error] {e}")
+BUY_INTENT_KEYWORDS = {
+    "me interesa",
+    "quiero esto",
+    "quiero sumarlo",
+    "quiero para mi tienda",
+    "quiero instalarlo",
+    "quiero avanzar",
+    "quiero contratar",
+}
 
-# ── SIGNAL LAYER ─────────────────────────────────────────────
+PRICING_INTENT_KEYWORDS = {
+    "precio",
+    "cual es el precio",
+    "cuál es el precio",
+    "cuanto cuesta",
+    "cuánto cuesta",
+    "cuanto sale",
+    "cuánto sale",
+    "cuanto vale",
+    "cuánto vale",
+    "planes",
+    "plan",
+    "costos",
+    "costo",
+    "mensual",
+    "inversion",
+    "inversión",
+    "valor",
+}
 
-def get_news_signal(question):
-    """Returns (headlines_text, signal_score -1..1)"""
-    if not NEWS_API_KEY:
-        return "", 0.0
-    try:
-        words = [w for w in question.split() if len(w) > 4][:5]
-        query = " ".join(words[:3])
-        from datetime import datetime, timedelta
-        date_from = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
-        r = requests.get(
-            "https://newsapi.org/v2/everything",
-            params={"q": query, "pageSize": 5, "sortBy": "publishedAt",
-                    "language": "en", "from": date_from, "apiKey": NEWS_API_KEY},
-            timeout=6
-        )
-        data = r.json()
-        articles = data.get("articles", [])
-        if not articles:
-            # Intentar con query más simple
-            query_simple = words[0] if words else query
-            r2 = requests.get(
-                "https://newsapi.org/v2/everything",
-                params={"q": query_simple, "pageSize": 5, "sortBy": "publishedAt",
-                        "language": "en", "from": date_from, "apiKey": NEWS_API_KEY},
-                timeout=6
-            )
-            articles = r2.json().get("articles", [])
-        if not articles:
-            return "", 0.0
-        headlines = [a["title"] for a in articles[:5] if a.get("title")]
-        text = " | ".join(headlines[:4])
-        return f"Noticias recientes: {text}", len(headlines) / 5.0
-    except:
-        return "", 0.0
+GUARANTEE_INTENT_KEYWORDS = {
+    "tiene garantia",
+    "tiene garantía",
+    "y si no me sirve",
+    "puedo cancelar",
+    "riesgo",
+    "sin riesgo",
+    "garantia",
+    "garantía",
+    "devolucion",
+    "devolución",
+}
 
-def get_metaculus_signal(question):
-    """Busca en Metaculus y retorna probabilidad de expertos"""
-    if not METACULUS_API_KEY:
-        return "", 0.0
-    try:
-        words = [w for w in question.split() if len(w) > 4][:3]
-        query = " ".join(words)
-        r = requests.get(
-            "https://www.metaculus.com/api2/questions/",
-            params={"search": query, "status": "open", "limit": 5, "has_forecasts": "true"},
-            headers={"Accept": "application/json", "Authorization": f"Token {METACULUS_API_KEY}"},
-            timeout=8
-        )
-        results = r.json().get("results", [])
-        for item in results:
-            q = item.get("question", {})
-            prob = q.get("aggregations", {}).get("recency_weighted", {}).get("latest", {})
-            if prob and isinstance(prob, dict):
-                centers = prob.get("centers")
-                if centers and len(centers) > 0:
-                    p = centers[0]
-                    title = item.get("title", "")[:50]
-                    return f"Metaculus: '{title}' → {round(p*100)}% expertos", p
-        return "", 0.0
-    except:
-        return "", 0.0
+TIMING_INTENT_KEYWORDS = {
+    "cuanto tarda",
+    "cuánto tarda",
+    "cuanto demora",
+    "cuánto demora",
+    "en cuanto tiempo",
+    "en cuánto tiempo",
+    "cuando estaria",
+    "cuándo estaría",
+    "cuando estaria listo",
+    "cuándo estaría listo",
+    "tiempo de implementacion",
+    "tiempo de implementación",
+    "tiempo de instalacion",
+    "tiempo de instalación",
+    "cuanto tiempo lleva",
+    "cuánto tiempo lleva",
+}
 
-def get_wikipedia_signal(question):
-    """Busca en Wikipedia contexto sobre el tema - gratis y sin rate limit"""
-    try:
-        words = [w for w in question.split() if len(w) > 4][:3]
-        query = " ".join(words)
-        r = requests.get(
-            "https://en.wikipedia.org/api/rest_v1/page/summary/" + query.replace(" ", "_"),
-            headers={"User-Agent": "PolymarketBot/1.0"},
-            timeout=6
-        )
-        if r.status_code != 200:
-            # Intentar búsqueda
-            r2 = requests.get(
-                "https://en.wikipedia.org/w/api.php",
-                params={"action": "query", "list": "search", "srsearch": query,
-                        "format": "json", "srlimit": 1},
-                headers={"User-Agent": "PolymarketBot/1.0"},
-                timeout=6
-            )
-            results = r2.json().get("query", {}).get("search", [])
-            if not results:
-                return "", 0.0
-            title = results[0]["title"]
-            r = requests.get(
-                f"https://en.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ', '_')}",
-                headers={"User-Agent": "PolymarketBot/1.0"},
-                timeout=6
-            )
-        data = r.json()
-        extract = data.get("extract", "")
-        if not extract:
-            return "", 0.0
-        return f"Wikipedia: {extract[:300]}", 0.5
-    except:
-        return "", 0.0
+INSTALL_INTENT_KEYWORDS = {
+    "instalacion",
+    "instalación",
+    "implementar",
+    "implementacion",
+    "implementación",
+    "dificil de instalar",
+    "difícil de instalar",
+}
 
-def get_reddit_sentiment(question):
-    """Searches Reddit for relevant posts, returns sentiment summary."""
-    try:
-        words = [w for w in question.split() if len(w) > 4][:3]
-        query = " ".join(words)
-        headers = {"User-Agent": "PolymarketBot/2.0"}
-        r = requests.get(
-            "https://www.reddit.com/search.json",
-            params={"q": query, "sort": "new", "limit": 10, "t": "week"},
-            headers=headers, timeout=6
-        )
-        posts = r.json().get("data", {}).get("children", [])
-        if not posts:
-            return "", 0.0
-        titles = [p["data"]["title"] for p in posts[:5]]
-        scores = [p["data"]["score"] for p in posts[:5]]
-        avg_score = sum(scores) / len(scores) if scores else 0
-        sentiment = "positivo" if avg_score > 10 else "neutral" if avg_score > 0 else "negativo"
-        text = f"Reddit ({len(posts)} posts, sentiment {sentiment}): " + " | ".join(titles[:3])
-        return text, min(1.0, len(posts) / 10.0)
-    except:
-        return "", 0.0
+SHOPIFY_INTENT_KEYWORDS = {
+    "shopify",
+    "tienda nube",
+    "tiendanube",
+    "woocommerce",
+    "plataforma",
+}
 
-def get_price_history_signal(market_id):
-    """Returns price momentum signal."""
-    try:
-        r = requests.get(
-            f"{CLOB_API}/prices-history?market={market_id}&interval=1d&fidelity=1",
-            timeout=6
-        )
-        history = r.json().get("history", [])
-        if len(history) < 3:
-            return "", 0.0, None
-        current  = history[-1]["p"]
-        day_ago  = history[-2]["p"]
-        week_ago = history[-7]["p"] if len(history) >= 7 else history[0]["p"]
-        chg_24h  = round((current - day_ago)  * 100, 1)
-        chg_7d   = round((current - week_ago) * 100, 1)
-        direction = "↑ subiendo" if chg_24h > 0 else "↓ bajando"
-        # momentum signal: consistent direction = stronger signal
-        momentum = chg_24h * 0.7 + chg_7d * 0.3
-        text = f"Precio {direction} {abs(chg_24h)}% en 24h / {abs(chg_7d)}% en 7 días (actual: {round(current*100)}%)"
-        return text, momentum / 100, current
-    except:
-        return "", 0.0, None
+CUSTOMIZATION_INTENT_KEYWORDS = {
+    "adaptar",
+    "personalizar",
+    "mi negocio",
+    "mi marca",
+    "tono",
+    "cambiar respuestas",
+}
 
-def get_orderbook_signal(market_id):
-    try:
-        r = requests.get(f"{CLOB_API}/book?token_id={market_id}", timeout=5)
-        data = r.json()
-        bids = data.get("bids", [])
-        asks = data.get("asks", [])
-        if not bids or not asks:
-            return "", 0.0
-        best_bid = float(bids[0]["price"]) if bids else 0
-        best_ask = float(asks[0]["price"]) if asks else 1
-        spread = round((best_ask - best_bid) * 100, 2)
-        bid_depth = sum(float(b["size"]) for b in bids[:5])
-        ask_depth = sum(float(a["size"]) for a in asks[:5])
-        total_depth = bid_depth + ask_depth
-        imbalance = (bid_depth - ask_depth) / (total_depth + 1)
-        
-        # Detectar smart money — apuesta grande en un lado
-        max_single_bid = max((float(b["size"]) for b in bids[:3]), default=0)
-        max_single_ask = max((float(a["size"]) for a in asks[:3]), default=0)
-        
-        smart_money = ""
-        if max_single_bid > 5000:
-            smart_money = f"⚡ SMART MONEY: apuesta grande de ${round(max_single_bid)} en SI"
-        elif max_single_ask > 5000:
-            smart_money = f"⚡ SMART MONEY: apuesta grande de ${round(max_single_ask)} en NO"
-        
-        text = (f"Orderbook: spread {spread}%, "
-                f"{'presión compradora' if imbalance > 0.1 else 'presión vendedora' if imbalance < -0.1 else 'equilibrado'} "
-                f"(imbalance {round(imbalance*100)}%)")
-        if smart_money:
-            text += f" | {smart_money}"
-        return text, imbalance
-    except:
-        return "", 0.0
-        
-def detect_easy_markets(question, market_prob, end_date):
-    """Detecta patrones de mercados fáciles de ganar."""
-    q = question.lower()
-    hints = []
-    
-    # Patron 1: fecha limite absurda
-    absurd_anchors = ["before gta vi", "before gta6", "before world war 3", 
-                      "before alien", "before asteroid"]
-    if any(a in q for a in absurd_anchors):
-        hints.append("FECHA LÍMITE ABSURDA — mercado probablemente mal calibrado")
-    
-    # Patron 2: evento religioso o imposible
-    impossible = ["second coming", "jesus", "rapture", "alien invasion", 
-                  "zombie", "apocalypse", "flat earth"]
-    if any(i in q for i in impossible):
-        hints.append("EVENTO IMPOSIBLE — probabilidad real cercana a 0%")
-    
-    # Patron 3: celebridad sin actividad
-    inactive_celebs = ["rihanna", "frank ocean", "tool album", "winds of winter",
-                       "half life 3", "kanye"]
-    if any(c in q for c in inactive_celebs):
-        hints.append("ARTISTA/PROYECTO INACTIVO — históricamente no cumple")
-    
-    # Patron 4: probabilidad extrema mal calibrada
-    if market_prob > 0.65:
-        hints.append(f"SOBREESTIMADO — mercado en {round(market_prob*100)}% puede ser demasiado optimista")
-    elif market_prob < 0.35:
-        hints.append(f"SUBESTIMADO — mercado en {round(market_prob*100)}% puede ser demasiado pesimista")
-    
-    return " | ".join(hints) if hints else ""
-   
-def aggregate_signals(question, market_id, market_prob):
-    """Combines all signals into a unified context string."""
-    signals = []
-    source_list = []
+TECHNICAL_OBJECTION_KEYWORDS = {
+    "no se programar",
+    "no sé programar",
+    "tecnico",
+    "técnico",
+    "codigo",
+    "código",
+}
 
-    news_text, news_conf = get_news_signal(question)
-    if news_text:
-        signals.append(news_text); source_list.append("NewsAPI")
+DEMO_INTENT_KEYWORDS = {
+    "demo",
+    "verlo",
+    "ver como funciona",
+    "ver cómo funciona",
+    "probar",
+}
 
-    wiki_text, wiki_conf = get_wikipedia_signal(question)
-    if wiki_text:
-        signals.append(wiki_text); source_list.append("Wikipedia")
+AI_INTENT_KEYWORDS = {
+    "es como chatgpt",
+    "es ia",
+    "es inteligencia artificial",
+    "funciona como una ia",
+    "funciona como una inteligencia artificial",
+    "chatgpt",
+}
 
-    reddit_text, reddit_conf = get_reddit_sentiment(question)
-    if reddit_text:
-        signals.append(reddit_text); source_list.append("Reddit")
+CONTACT_INTENT_KEYWORDS = {
+    "contacto",
+    "hablar con alguien",
+    "whatsapp",
+    "mail",
+    "correo",
+    "email",
+}
 
-    meta_text, meta_pred = get_metaculus_signal(question)
-    if meta_text:
-        signals.append(meta_text); source_list.append("Metaculus")
-        if meta_pred:
-            meta_edge = meta_pred - market_prob
-            if abs(meta_edge) > 0.08:
-                signals.append(f"⚠️  Metaculus vs Polymarket: diferencia de {round(meta_edge*100)}pp — posible mispricing")
+FAQ_INDEX = {faq.key: faq for faq in FAQS}
 
-    price_text, momentum, current_price = get_price_history_signal(market_id)
-    if price_text:
-        signals.append(price_text); source_list.append("PriceHistory")
 
-    ob_text, imbalance = get_orderbook_signal(market_id)
-    if ob_text:
-        signals.append(ob_text); source_list.append("Orderbook")
-
-    easy_hint = detect_easy_markets(question, market_prob, "")
-    if easy_hint:
-        signals.insert(0, f"⚡ PATRÓN DETECTADO: {easy_hint}")
-    return "\n".join(signals), ", ".join(source_list) or "ninguna", meta_pred
-
-# ── PERFORMANCE CONTEXT FOR CLAUDE ───────────────────────────
-
-def get_performance_context():
-    bets = get_all_bets()
-    resolved = [b for b in bets if b["status"] in ("won","lost")]
-    if not resolved:
-        return """Sin historial aún. 
-SESGOS CONOCIDOS DE POLYMARKET A EXPLOTAR:
-- Mercados de eventos imposibles/improbables sobreestimados (segunda venida, aliens, etc)
-- Mercados de celebridades sin actividad reciente sobreestimados
-- Mercados donde GTA VI es la fecha límite: GTA VI tiene fecha confirmada 2025/2026
-- Probabilidades entre 40-60% suelen estar mal calibradas
-ESTRATEGIA: buscar mercados donde el precio está muy lejos de la realidad."""
-
-    won = [b for b in resolved if b["status"]=="won"]
-    lost = [b for b in resolved if b["status"]=="lost"]
-    wr = round(len(won)/len(resolved)*100,1)
-    total_pnl = sum(b["pnl"] for b in resolved)
-
-    recent_won = [f'"{b["question"][:40]}" ({b.get("reasoning","")[:40]})' for b in won[-3:]]
-    recent_lost = [f'"{b["question"][:40]}" ({b.get("reasoning","")[:40]})' for b in lost[-3:]]
-
-    return f"""Historial: {len(resolved)} resueltas, win rate {wr}%, P&L {round(total_pnl)} USDC
-Últimas GANADAS: {"; ".join(recent_won) if recent_won else "ninguna"}
-Últimas PERDIDAS (NO repetir estos errores): {"; ".join(recent_lost) if recent_lost else "ninguna"}
-SESGOS A EXPLOTAR: eventos imposibles sobreestimados, celebridades sin actividad, fechas límite absurdas."""
-
-    # Edge accuracy: did Claude's prob align with outcome?
-    edge_hits = 0
-    for b in resolved:
-        claude_prob = b.get("prob_claude") or b.get("prob_market", 0.5)
-        if b["side"] == "SI":
-            predicted_win = claude_prob > 0.5
-        else:
-            predicted_win = claude_prob < 0.5
-        if (predicted_win and b["status"] == "won") or (not predicted_win and b["status"] == "lost"):
-            edge_hits += 1
-    edge_acc = round(edge_hits / len(resolved) * 100, 1) if resolved else 0
-
-    # Recent errors for learning
-    recent_lost = [b for b in lost[-3:]]
-    error_context = ""
-    if recent_lost:
-        errors = "; ".join([f'"{b["question"][:40]}" (aposté {b["side"]}, reasoning: {b.get("reasoning","?")[:50]})' for b in recent_lost])
-        error_context = f"\nÚltimas apuestas perdidas (APRENDE de estos errores): {errors}"
-
-    return (f"Historial: {len(resolved)} resueltas, win rate {wr}%, P&L total {round(total_pnl)} USDC, "
-            f"edge accuracy {edge_acc}%.{error_context}")
-
-# ── KELLY CRITERION ───────────────────────────────────────────
-
-def kelly_fraction(prob_win, odds_b, max_fraction=0.12, kelly_divisor=4):
-    """
-    Kelly: f* = (b*p - q) / b
-    prob_win: Claude's estimated probability of winning
-    odds_b:   net odds (payout per unit risked), e.g. if market prob=0.3, odds = 1/0.3 - 1 = 2.33
-    Returns fraction of bankroll to bet (fractional Kelly = /4 for safety)
-    """
-    if odds_b <= 0 or prob_win <= 0:
-        return 0.0
-    q  = 1 - prob_win
-    f  = (odds_b * prob_win - q) / odds_b
-    f  = max(0, f / kelly_divisor)       # fractional Kelly
-    return min(f, max_fraction)          # hard cap
-
-def compute_bet_size(balance, kelly_f, confidence):
-    """Translates Kelly fraction to actual dollar amount."""
-    base   = balance * kelly_f
-    # confidence multiplier: scale between 0.5x and 1.0x
-    conf_mult = 0.5 + (confidence / 10) * 0.5
-    amount = base * conf_mult
-    return min(300, max(5, round(amount, 2)))
-
-# ── DUAL CLAUDE PIPELINE ──────────────────────────────────────
-
-def haiku_filter(markets_with_prob):
-    """
-    Claude Haiku: fast bulk filter.
-    Takes list of (market, prob), returns top 5 most interesting.
-    """
-    if not ANTHROPIC_API_KEY:
-        return markets_with_prob[:8]
-    try:
-        perf_ctx = get_performance_context()
-        market_list = "\n".join([
-            f"{i+1}. [{round(p*100)}%] {m.get('question','')[:80]} (vol: ${round(float(m.get('volume',0))/1000)}K)"
-            for i, (m, p) in enumerate(markets_with_prob[:50])
-        ])
-        prompt = f"""Eres un filtro rápido de mercados de predicción.
-
-Contexto de rendimiento del bot:
-{perf_ctx}
-
-Lista de mercados disponibles:
-{market_list}
-
-Selecciona los 8 mercados con MAYOR potencial de edge (donde el mercado puede estar equivocado).
-Prioriza: eventos con información asimétrica, mercados con momentum claro, probabilidades extremas injustificadas.
-Evita: mercados donde tenemos historial malo, temas sin información disponible.
-
-Responde SOLO con JSON:
-{{"top": [1, 3, 7, 12, 18, 22, 25, 30]}}
-(indices de los mercados seleccionados)"""
-
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY,
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001",
-                  "max_tokens": 100,
-                  "messages": [{"role":"user","content":prompt}]},
-            timeout=15
-        )
-        text  = r.json()["content"][0]["text"].strip()
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        data  = json.loads(match.group()) if match else {}
-        indices = [i-1 for i in data.get("top", []) if 0 < i <= len(markets_with_prob)]
-        if indices:
-            return [markets_with_prob[i] for i in indices[:8]]
-    except Exception as e:
-        print(f"[haiku_filter error] {e}")
-    return markets_with_prob[:8]
-
-def sonnet_analyze(question, market_prob, end_date, market_id, signals_text, meta_pred=None):
-    """
-    Claude Sonnet: deep analysis on a single market.
-    Returns full structured analysis.
-    """
-    if not ANTHROPIC_API_KEY:
-        return None, "Sin API key"
-    try:
-        perf_ctx = get_performance_context()
-        meta_hint = f"\nPredicción de Metaculus (forecasters expertos): {round(meta_pred*100)}%" if meta_pred else ""
-
-        # Buscar mercados relacionados para detectar inconsistencias
-        all_bets = get_all_bets()
-        open_bets = [b for b in all_bets if b["status"]=="open"]
-        related = []
-        q_words = set(w.lower() for w in question.split() if len(w) > 4)
-        for b in open_bets:
-            b_words = set(w.lower() for w in b["question"].split() if len(w) > 4)
-            if len(q_words & b_words) >= 2:
-                related.append(f'"{b["question"][:50]}" → apostamos {b["side"]} al {round(b.get("prob_market",0.5)*100)}%')
-        if related:
-            meta_hint += f"\nMercados relacionados ya apostados: {'; '.join(related[:2])}"
-        prompt = f"""Eres un analista elite de mercados de predicción con track record probado.
-
-=== CONTEXTO DE RENDIMIENTO ===
-{perf_ctx}
-
-=== MERCADO A ANALIZAR ===
-Pregunta: "{question}"
-Probabilidad actual del mercado: {round(market_prob*100)}%
-Fecha de resolución: {end_date}
-{meta_hint}
-
-=== SEÑALES AGREGADAS ===
-{signals_text if signals_text else "Sin señales adicionales disponibles."}
-
-=== TU TAREA ===
-1. Estima la probabilidad REAL del evento (no la del mercado)
-2. Identifica si hay edge real (diferencia > 5pp entre tu estimación y el mercado)
-3. Decide si apostar SI o NO
-4. Evalúa tu confianza en la información disponible (1-10)
-
-Razona paso a paso internamente, luego responde SOLO en este JSON exacto:
-{{
-  "prob": 65,
-  "side": "SI",
-  "reasoning": "explicación de máx 120 caracteres en español",
-  "confidence": 7,
-  "edge_quality": "alta|media|baja",
-  "key_signal": "la señal más importante que usaste"
-}}"""
-
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY,
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": "claude-sonnet-4-6",
-                  "max_tokens": 300,
-                  "messages": [{"role":"user","content":prompt}]},
-            timeout=25
-        )
-        text  = r.json()["content"][0]["text"].strip()
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        return json.loads(match.group()) if match else None, None
-    except Exception as e:
-        return None, str(e)
-
-# ── TAKE PROFIT / STOP LOSS MONITOR ──────────────────────────
-
-TAKE_PROFIT_THRESHOLD = 0.20   # +20% from entry → close
-STOP_LOSS_THRESHOLD   = 0.25   # -50% → close (paper only)
-
-def monitor_open_positions():
-    """Checks open bets against current market price. Simulates take profit / stop loss."""
-    bets = get_all_bets()
-    open_bets = [b for b in bets if b["status"] == "open"]
-    balance   = get_state("balance", 10000)
-
-    for b in open_bets:
-        try:
-            market_id = b.get("market_id","")
-            if not market_id:
-                continue
-            _, _, current_price = get_price_history_signal(market_id)
-            if current_price is None:
-                continue
-
-            entry = b.get("price_entry") or b.get("prob_market", 0.5)
-            side  = b["side"]
-
-            # For NO bets, we win when price goes DOWN
-            if side == "NO":
-                price_move = (entry - current_price) / entry   # positive = price dropped = good for NO
-            else:
-                price_move = (current_price - entry) / entry   # positive = price up = good for SI
-
-            update_bet_price(b["id"], current_price)
-
-            if price_move >= TAKE_PROFIT_THRESHOLD:
-                # Simulate closing at current favorable price
-                if side == "NO":
-                    implied_odds = 1 / (1 - current_price) - 1
-                else:
-                    implied_odds = 1 / current_price - 1
-                winnings = b["amount"] * implied_odds * 0.95
-                new_balance = balance + b["amount"] + winnings
-                set_state("balance", new_balance)
-                set_state("won", get_state("won",0) + 1)
-                update_bet_price(b["id"], current_price, status="won",
-                                 pnl=round(winnings,2), take_profit_hit=True)
-                print(f"[TAKE PROFIT] {b['question'][:40]} +{round(winnings,2)} USDC")
-                balance = new_balance
-
-            elif price_move <= -STOP_LOSS_THRESHOLD:
-                update_bet_price(b["id"], current_price, status="lost",
-                                 pnl=-b["amount"], stop_loss_hit=True)
-                set_state("lost", get_state("lost",0) + 1)
-                print(f"[STOP LOSS] {b['question'][:40]}")
-
-        except Exception as e:
-            print(f"[monitor error] {e}")
-
-# ── REAL RESOLUTION ───────────────────────────────────────────
-
-def resolve_bet_real(bet_id):
-    """Tries to resolve a bet using real Polymarket data."""
-    bets = get_all_bets()
-    bet  = next((b for b in bets if b["id"] == bet_id), None)
-    if not bet or bet["status"] != "open":
-        return
-
-    try:
-        mid = bet.get("market_id","")
-        if mid:
-            r = requests.get(f"{GAMMA_API}/markets/{mid}", timeout=5)
-            m = r.json()
-            if m.get("resolved") or m.get("closed"):
-                winner  = m.get("winner","")
-                outcomes= m.get("outcomes", ["Yes","No"])
-                if bet["side"] == "SI":
-                    won = (winner == outcomes[0]) if outcomes else False
-                else:
-                    won = (winner == outcomes[1]) if len(outcomes) > 1 else False
-                _finalize_bet(bet, won)
-                return
-
-        # Fallback: search by question in closed markets
-        r2 = requests.get(f"{GAMMA_API}/markets?closed=true&limit=100", timeout=5)
-        data = r2.json()
-        markets = data if isinstance(data, list) else data.get("markets",[])
-        resolved = next((m for m in markets
-                         if m.get("question","")[:80] == bet["question"]
-                         and m.get("resolved")), None)
-        if resolved:
-            winner  = resolved.get("winner","")
-            outcomes= resolved.get("outcomes",["Yes","No"])
-            won = (winner == outcomes[0]) if bet["side"] == "SI" else (winner == outcomes[1] if len(outcomes)>1 else False)
-            _finalize_bet(bet, won)
-        else:
-            # Not resolved yet — retry in 2h
-            t = threading.Timer(7200, resolve_bet_real, args=[bet_id])
-            t.daemon = True; t.start()
-    except Exception as e:
-        print(f"[resolve error] {e}")
-        t = threading.Timer(7200, resolve_bet_real, args=[bet_id])
-        t.daemon = True; t.start()
-
-def _finalize_bet(bet, won):
-    balance = get_state("balance", 10000)
-    if won:
-        # Use actual market prob for correct payout
-        entry_prob = bet.get("price_entry") or bet["prob_market"]
-        odds       = (1 / entry_prob - 1) if bet["side"] == "SI" else (1 / (1 - entry_prob) - 1)
-        winnings   = bet["amount"] * odds * 0.95
-        set_state("balance", balance + bet["amount"] + winnings)
-        set_state("won", get_state("won",0) + 1)
-        update_bet_price(bet["id"], bet.get("price_current", entry_prob),
-                         status="won", pnl=round(winnings,2))
-        print(f"[WON] {bet['question'][:40]} +{round(winnings,2)} USDC")
-    else:
-        set_state("lost", get_state("lost",0) + 1)
-        update_bet_price(bet["id"], bet.get("price_current", bet["prob_market"]),
-                         status="lost", pnl=-bet["amount"])
-        print(f"[LOST] {bet['question'][:40]} -{bet['amount']} USDC")
-
-def place_bet(question, market_id, side, amount, prob_market,
-              prob_claude, edge, confidence, kelly_f, reasoning, sources_used):
-    balance = get_state("balance", 10000)
-    if balance < amount:
-        return None
-    set_state("balance", balance - amount)
-    set_state("bets_placed", get_state("bets_placed",0) + 1)
-    set_state("total_edge", get_state("total_edge",0) + edge)
-
-    bet = {
-        "id":           str(datetime.now().timestamp()),
-        "question":     question,
-        "market_id":    market_id,
-        "side":         side,
-        "amount":       amount,
-        "prob_market":  prob_market,
-        "prob_claude":  prob_claude,
-        "edge":         round(edge, 4),
-        "confidence":   confidence,
-        "kelly_f":      round(kelly_f, 4),
-        "status":       "open",
-        "pnl":          0,
-        "reasoning":    reasoning,
-        "sources_used": sources_used,
-        "price_entry":  prob_market,
-        "price_current":prob_market,
+def normalize_text(text: str) -> str:
+    text = text.lower().strip()
+    replacements = {
+        "á": "a",
+        "é": "e",
+        "í": "i",
+        "ó": "o",
+        "ú": "u",
+        "ñ": "n",
     }
-    save_bet(bet)
+    for a, b in replacements.items():
+        text = text.replace(a, b)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
 
-    # Schedule real resolution check
-    t = threading.Timer(3600, resolve_bet_real, args=[bet["id"]])
-    t.daemon = True; t.start()
-    return bet
 
-# ── MAIN BOT LOGIC ────────────────────────────────────────────
+def default_suggestions() -> List[str]:
+    return BASE_QUICK_REPLIES.copy()
 
-@app.route("/bot-bet", methods=["POST"])
-def bot_bet():
-    try:
-        # 1. Fetch markets
-        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=500", timeout=8)
-        data    = r.json()
-        markets = data if isinstance(data, list) else data.get("markets",[])
 
-        # 2. Filter: no sports, prob range, volume, expiry
-        available = []
-        now_utc = datetime.now(timezone.utc)
-        for m in markets:
-            if not m.get("active") or m.get("closed"):
-                continue
-            q = m.get("question","").lower()
-            tags = " ".join(t.get("slug","") for t in m.get("tags",[]))
-            if any(x in q + tags for x in SPORTS_FILTER):
-                continue
-            try:
-                prices = m.get("outcomePrices","")
-                if isinstance(prices, str):
-                    prices = json.loads(prices)
-                if not prices:
-                    continue
-                prob = float(prices[0])
-                vol  = float(m.get("volume", 0))
-                if not (0.15 < prob < 0.85):
-                    continue
-                if vol < 5:
-                    continue
-                end_date = m.get("endDate", m.get("end_date",""))
-                if end_date:
-                    end = datetime.fromisoformat(end_date.replace("Z","+00:00"))
-                    days_left = (end - now_utc).days
-                    if days_left > 365 or days_left < 1:
-                        continue
-                    m['days_left'] = days_left
-                available.append((m, prob))
-            except:
-                continue
+def single_follow_up(items: List[str] | None) -> List[str]:
+    if not items:
+        defaults = default_suggestions()
+        return defaults[:1]
+    return items[:1]
 
-        # 3. Deduplicate against open bets
-        existing_bets     = get_all_bets()
-        existing_questions = {b["question"] for b in existing_bets if b["status"] == "open"}
-        existing_keywords  = set()
-        for q in existing_questions:
-            for w in q.lower().split():
-                if len(w) > 5:
-                    existing_keywords.add(w)
 
-        def topic_overlap(question):
-            words   = question.lower().split()
-            matches = sum(1 for w in words if len(w) > 5 and w in existing_keywords)
-            return matches >= 5
+def contains_any(text: str, keywords: set[str]) -> bool:
+    return any(normalize_text(keyword) in text for keyword in keywords)
 
-        available = [(m, p) for m, p in available
-                     if m.get("question","")[:80] not in existing_questions
-                     and not topic_overlap(m.get("question",""))]
-        open_count = len([b for b in get_all_bets() if b["status"]=="open"])
-        if open_count >= 25:
-            return jsonify({"message": f"Máximo 15 apuestas abiertas ({open_count} activas)", "reasoning": ""})
-        if not available:
-            return jsonify({"message": "Sin mercados nuevos disponibles", "reasoning": ""})
 
-        # 4. Haiku filter → top 5
-        available.sort(key=lambda x: x[0].get('days_left', 365))
-        top5 = haiku_filter(available)
+def exact_match(text: str, keywords: set[str]) -> bool:
+    return any(normalize_text(keyword) == text for keyword in keywords)
 
-        # 5. Sonnet deep analysis on each → pick best edge
-        best_result   = None
-        best_market   = None
-        best_prob     = None
-        best_edge     = 0
-        best_signals  = ""
-        best_sources  = ""
-        best_meta     = None
 
-        for m_candidate, prob_candidate in top5:
-            q   = m_candidate.get("question","")[:80]
-            mid = m_candidate.get("id","")
-            end = m_candidate.get("endDate", m_candidate.get("end_date",""))
+def count_matches(text: str, keywords: set[str] | list[str]) -> int:
+    return sum(1 for keyword in keywords if normalize_text(keyword) in text)
 
-            signals_text, sources, meta_pred = aggregate_signals(q, mid, prob_candidate)
-            result, err = sonnet_analyze(q, prob_candidate, end, mid, signals_text, meta_pred)
 
-            if not result:
-                continue
-            ai_prob = result["prob"] / 100
-            edge    = abs(ai_prob - prob_candidate)
+def find_argentina_location(text: str) -> str | None:
+    for normalized_name, display_name in ARGENTINA_LOCATIONS:
+        if normalized_name in text:
+            return display_name
+    return None
 
-            if edge > best_edge:
-                best_edge    = edge
-                best_market  = m_candidate
-                best_prob    = prob_candidate
-                best_result  = result
-                best_signals = signals_text
-                best_sources = sources
-                best_meta    = meta_pred
 
-        if not best_market or not best_result:
-            return jsonify({"message": "Claude: sin edge suficiente en ningún mercado", "reasoning": ""})
+def find_international_country(text: str) -> str | None:
+    for normalized_name, display_name in INTERNATIONAL_COUNTRIES:
+        if normalized_name in text:
+            return display_name
+    return None
 
-        ai_prob    = best_result["prob"] / 100
-        side       = best_result["side"]
-        confidence = best_result.get("confidence", 5)
-        reasoning  = best_result.get("reasoning", "")
-        edge       = best_edge
 
-        # 6. Edge threshold + confidence gate
-        if edge < 0.05 or confidence < 4:
-            return jsonify({
-                "message": f"Claude: edge {round(edge*100,1)}pp insuficiente (mín 8pp) o confianza baja ({confidence}/10)",
-                "reasoning": reasoning
-            })
-            
-        sources = best_result.get("sources_used", "")
-        if not sources and confidence < 6:
-            return jsonify({
-                "message": f"Claude: sin fuentes y confianza {confidence}/10 — apuesta cancelada",
-                "reasoning": reasoning
-            })
+def confidence_label(score: int) -> str:
+    if score >= 2:
+        return "alta"
+    if score == 1:
+        return "media"
+    return "baja"
 
-        # 7. Kelly sizing
-        if side == "SI":
-            odds_b = 1 / best_prob - 1
-        else:
-            odds_b = 1 / (1 - best_prob) - 1
-        kelly_f = kelly_fraction(ai_prob if side=="SI" else (1-ai_prob), odds_b)
 
-        if kelly_f == 0:
-            return jsonify({"message": "Kelly: sin edge positivo esperado", "reasoning": reasoning})
+def build_location_shipping_reply(location: str) -> str:
+    return (
+        f"En {location} también podemos implementar Nivora 👍\n\n"
+        "La activación suele quedar lista entre 24 y 72 horas, según la complejidad de tu tienda y la configuración inicial.\n\n"
+        "Si querés, te contamos cuál sería la forma más simple de dejarlo funcionando en tu caso."
+    )
 
-        balance = get_state("balance", 10000)
-        amount  = compute_bet_size(balance, kelly_f, confidence)
 
-        # 8. Place bet
-        question = best_market.get("question","")[:80]
-        market_id = best_market.get("id","")
-        bet = place_bet(
-            question, market_id, side, amount,
-            best_prob, ai_prob, edge, confidence,
-            kelly_f, reasoning, best_sources
-        )
-        if not bet:
-            return jsonify({"message": "Saldo insuficiente", "reasoning": ""})
+def build_international_reply(country: str | None = None) -> str:
+    place = country or "tu país"
+    return (
+        f"Sí, también podemos implementar Nivora en {place} 👍\n\n"
+        f"Si estás fuera de Argentina, escribinos por mail a {SUPPORT_EMAIL} y te contamos cómo sería la implementación según tu caso y tu tienda.\n\n"
+        "La idea es encontrar la mejor forma de adaptarlo para que también te funcione bien desde allá."
+    )
 
-        return jsonify({
-            "message":    f"✅ Claude apostó {side} ${amount} USDC (Kelly {round(kelly_f*100,1)}%, edge {round(edge*100,1)}pp, conf {confidence}/10)",
-            "reasoning":  reasoning,
-            "key_signal": best_result.get("key_signal",""),
-            "sources":    best_sources,
-            "edge":       round(edge*100,1),
-            "confidence": confidence
-        })
 
-    except Exception as e:
-        return jsonify({"message": f"Error: {e}", "reasoning": ""})
+def detect_intent(message: str) -> tuple[str, str, str | None]:
+    text = normalize_text(message)
+    location = find_argentina_location(text)
+    country = find_international_country(text)
 
-# ── API ENDPOINTS ─────────────────────────────────────────────
+    charla_basica_keywords = {
+        "como estas",
+        "que tal",
+        "todo bien",
+        "como va",
+    }
+    saludo_keywords = {
+        "hola",
+        "holaa",
+        "buenas",
+        "buen dia",
+        "buenos dias",
+        "buenas tardes",
+        "buenas noches",
+        "hello",
+        "hi",
+    }
+    implementacion_keywords = {
+        "cuanto tarda",
+        "cuanto demora",
+        "en cuanto tiempo",
+        "tarda mucho",
+        "activacion",
+        "activarse",
+        "puesta en marcha",
+        "instalarse",
+        "integrarse",
+        "configurarse",
+        "implementarse",
+        "dejarlo funcionando",
+        "implementacion",
+        "integracion",
+        "configuracion",
+        "instalar",
+        "integrar",
+        "configurar",
+    }
+    preguntas_keywords = {
+        "que tipo de preguntas responde",
+        "que puede responder",
+        "que tipo de dudas responde",
+        "que dudas responde",
+        "que consultas responde",
+        "preguntas frecuentes",
+        "faq",
+        "responde preguntas",
+    }
+    envio_general_keywords = {
+        "cobertura",
+        "zona",
+        "localidad",
+        "llega a",
+        "a ",
+    }
+    precio_keywords = {
+        "precio",
+        "precios",
+        "cuanto sale",
+        "cuanto vale",
+        "cuanto cuesta",
+        "cuesta",
+        "plan",
+        "planes",
+    }
+    internacional_keywords = {
+        "otros paises",
+        "otros países",
+        "fuera de argentina",
+        "desde chile",
+        "desde uruguay",
+        "desde brasil",
+        "desde ecuador",
+        "funciona en",
+        "sirve en",
+        "puedo usarlo desde",
+        "trabajan con",
+        "se puede instalar si soy de",
+        "lo pueden implementar en",
+        "se puede usar en",
+        "puede funcionar en",
+    }
+    funciona_realmente_keywords = {
+        "funciona realmente",
+        "esto funciona",
+        "sirve de verdad",
+        "vale la pena",
+        "funciona bien",
+        "funciona",
+        "vale",
+    }
+    tipo_de_tienda_keywords = {
+        "funciona para todo tipo de tiendas",
+        "sirve para mi tienda",
+        "se puede usar en cualquier negocio",
+        "aplica a mi caso",
+        "funciona para ecommerce",
+        "funciona para tienda",
+        "funciona para marca",
+        "todo tipo de tiendas",
+        "mi tienda",
+        "cualquier negocio",
+    }
+    stock_keywords = {"stock", "disponible", "hay stock", "tenes stock"}
+    uso_keywords = {
+        "como se usa",
+        "uso",
+        "usar",
+        "aplicar",
+        "aplicacion",
+        "sirve para mi caso",
+        "sirve para mi",
+    }
+    cambios_keywords = {
+        "cambio",
+        "cambios",
+        "devolucion",
+        "devolver",
+        "cambiar",
+    }
+    personalizacion_keywords = {
+        "tono",
+        "personalidad",
+        "personalizar",
+        "adaptar",
+        "forma de responder",
+        "estilo de respuesta",
+        "como responde el bot",
+        "como funciona el bot",
+    }
+    agradecimiento_keywords = {
+        "gracias",
+        "genial",
+        "joya",
+        "dale",
+        "ok",
+        "okay",
+    }
 
-@app.route("/metrics")
-def metrics():
-    bets       = get_all_bets()
-    open_bets  = [b for b in bets if b["status"] == "open"]
-    won        = int(get_state("won",0))
-    lost       = int(get_state("lost",0))
-    total      = won + lost
-    winrate    = f"{round(won/total*100)}%" if total > 0 else "—"
-    avg_edge   = round(get_state("total_edge",0) / max(1,get_state("bets_placed",1)) * 100, 1)
-    total_pnl  = sum(b["pnl"] for b in bets if b["status"] != "open")
-    return jsonify({
-        "balance":    get_state("balance",10000),
-        "open":       len(open_bets),
-        "winrate":    winrate,
-        "won":        won,
-        "lost":       lost,
-        "avg_edge":   f"{avg_edge}pp",
-        "total_pnl":  round(total_pnl, 2)
-    })
+    for intent in INTENT_PRIORITY:
+        if intent == "charla_basica":
+            score = count_matches(text, charla_basica_keywords)
+            if score:
+                return intent, confidence_label(score), None
 
-@app.route("/markets")
-def get_markets():
-    try:
-        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=20", timeout=5)
-        data    = r.json()
-        markets = data if isinstance(data, list) else data.get("markets",[])
-        markets = [m for m in markets if m.get("active") and not m.get("closed")][:20]
-        result  = []
-        for m in markets:
-            try:
-                prices = m.get("outcomePrices","")
-                if isinstance(prices, str): prices = json.loads(prices)
-                prob = round(float(prices[0]) * 100) if prices else 50
-                vol  = float(m.get("volume", 0))
-                vol_str = (f"${round(vol/1e6,1)}M" if vol>1e6 else f"${round(vol/1000)}K") + " vol"
-                result.append({"question": m.get("question","")[:80], "prob": prob, "volume": vol_str})
-            except: continue
-        return jsonify(result)
-    except: return jsonify([])
+        if intent == "saludo":
+            score = 2 if exact_match(text, saludo_keywords) else 0
+            if score:
+                return intent, confidence_label(score), None
 
-@app.route("/bets")
-def get_bets():
-    bets   = get_all_bets()[:15]
-    result = []
-    for b in bets:
-        pnl      = b["pnl"] or 0
-        pnl_text = "—" if b["status"]=="open" else (("+" if pnl>0 else "")+str(round(pnl))+" USDC")
-        tp_flag  = " 🎯" if b.get("take_profit_hit") else ""
-        sl_flag  = " 🛑" if b.get("stop_loss_hit")   else ""
-        result.append({
-            "question":    b["question"],
-            "side":        b["side"],
-            "amount":      b["amount"],
-            "pnl":         pnl,
-            "status":      b["status"],
-            "pnl_text":    pnl_text,
-            "status_text": {"open":"abierta","won":"ganada","lost":"perdida"}.get(b["status"],"") + tp_flag + sl_flag,
-            "edge":        round((b.get("edge") or 0)*100, 1),
-            "confidence":  b.get("confidence", 0),
-            "kelly_f":     round((b.get("kelly_f") or 0)*100, 1),
-            "reasoning":   b.get("reasoning",""),
-            "sources":     b.get("sources_used",""),
-            "prob_market": b.get("prob_market", 0),
-        })
-    return jsonify(result)
+        if intent == "tipo_de_preguntas_que_responde":
+            score = count_matches(text, preguntas_keywords)
+            if score:
+                return intent, confidence_label(score), None
 
-@app.route("/monitor", methods=["POST"])
-def manual_monitor():
-    threading.Thread(target=monitor_open_positions, daemon=True).start()
-    return jsonify({"ok": True, "message": "Monitor iniciado"})
+        if intent == "implementacion_nivora":
+            if country:
+                score = count_matches(text, implementacion_keywords | internacional_keywords)
+                if score:
+                    return "consultas_internacionales", confidence_label(score), country
+            score = count_matches(text, implementacion_keywords)
+            if score:
+                return intent, confidence_label(score), None
 
-@app.route("/performance")
-def performance():
-    bets     = get_all_bets()
-    resolved = [b for b in bets if b["status"] in ("won","lost")]
-    if not resolved:
-        return jsonify({"message": "Sin apuestas resueltas aún"})
-    by_edge = {"high":[],"medium":[],"low":[]}
-    for b in resolved:
-        e = (b.get("edge") or 0)
-        cat = "high" if e > 0.15 else "medium" if e > 0.08 else "low"
-        by_edge[cat].append(b)
-    def wr(lst):
-        if not lst: return "—"
-        w = sum(1 for b in lst if b["status"]=="won")
-        return f"{round(w/len(lst)*100)}% ({len(lst)} bets)"
-    return jsonify({
-        "win_rate_high_edge":   wr(by_edge["high"]),
-        "win_rate_medium_edge": wr(by_edge["medium"]),
-        "win_rate_low_edge":    wr(by_edge["low"]),
-        "avg_confidence_won":   round(sum(b.get("confidence",5) for b in resolved if b["status"]=="won") / max(1,sum(1 for b in resolved if b["status"]=="won")),1),
-        "sources_effectiveness": "Ver /bets para detalle por apuesta"
-    })
+        if intent == "consultas_internacionales":
+            score = count_matches(text, internacional_keywords)
+            if country:
+                score += 1
+                if text == normalize_text(country):
+                    score += 1
+                if any(
+                    phrase in text
+                    for phrase in {
+                        f"funciona en {normalize_text(country)}",
+                        f"sirve en {normalize_text(country)}",
+                        f"desde {normalize_text(country)}",
+                        f"instalar si soy de {normalize_text(country)}",
+                        f"implementar en {normalize_text(country)}",
+                    }
+                ):
+                    score += 1
+            if score:
+                return intent, confidence_label(score), country
 
-# ── BACKGROUND LOOPS ──────────────────────────────────────────
+        if intent == "envio_por_ubicacion" and location:
+            score = count_matches(text, envio_general_keywords)
+            if text == normalize_text(location):
+                score += 1
+            if text == f"a {normalize_text(location)}":
+                score += 1
+            if any(
+                phrase in text
+                for phrase in {
+                    f"y a {normalize_text(location)}",
+                    f"cobertura en {normalize_text(location)}",
+                    f"llega a {normalize_text(location)}",
+                    f"en {normalize_text(location)}",
+                }
+            ):
+                score += 1
+            if score:
+                return intent, confidence_label(score), location
 
-def bet_loop():
-    while True:
-        time.sleep(600)   # every 10 min
-        try:
-            with app.test_request_context():
-                bot_bet()
-        except Exception as e:
-            print(f"[bet_loop error] {e}")
+        if intent == "precio":
+            score = count_matches(text, precio_keywords)
+            if score:
+                return intent, confidence_label(score), None
 
-def monitor_loop():
-    while True:
-        time.sleep(3600)  # every 1h
-        try:
-            monitor_open_positions()
-        except Exception as e:
-            print(f"[monitor_loop error] {e}")
+        if intent == "funciona_realmente":
+            score = count_matches(text, funciona_realmente_keywords)
+            if score:
+                return intent, confidence_label(score), None
 
-threading.Thread(target=bet_loop,     daemon=True).start()
-threading.Thread(target=monitor_loop, daemon=True).start()
+        if intent == "tipo_de_tienda":
+            score = count_matches(text, tipo_de_tienda_keywords)
+            if score:
+                return intent, confidence_label(score), None
 
-# ── FRONTEND ──────────────────────────────────────────────────
+        if intent == "stock":
+            score = count_matches(text, stock_keywords)
+            if score:
+                return intent, confidence_label(score), None
 
-HTML = """<!DOCTYPE html>
-<html>
+        if intent == "uso":
+            score = count_matches(text, uso_keywords)
+            if score:
+                return intent, confidence_label(score), None
+
+        if intent == "cambios":
+            score = count_matches(text, cambios_keywords)
+            if score:
+                return intent, confidence_label(score), None
+
+        if intent == "personalizacion_bot":
+            score = count_matches(text, personalizacion_keywords)
+            if score:
+                return intent, confidence_label(score), None
+
+        if intent == "agradecimiento":
+            score = 2 if exact_match(text, agradecimiento_keywords) else 0
+            if score:
+                return intent, confidence_label(score), None
+
+    return "desconocido", "baja", None
+
+
+def get_faq(key: str) -> FAQ | None:
+    return FAQ_INDEX.get(key)
+
+
+def find_best_faq(message: str) -> FAQ | None:
+    text = normalize_text(message)
+    best_faq = None
+    best_score = 0
+
+    for faq in FAQS:
+        score = 0
+        for keyword in faq.keywords:
+            keyword_norm = normalize_text(keyword)
+            if keyword_norm in text:
+                score += 3
+        title_words = normalize_text(faq.title).split()
+        score += sum(1 for w in title_words if len(w) > 3 and w in text)
+        if score > best_score:
+            best_score = score
+            best_faq = faq
+
+    return best_faq if best_score > 0 else None
+
+
+def generate_response(intent: str, location: str | None = None) -> tuple[str, List[str]]:
+    if intent == "charla_basica":
+        return "¡Muy bien! 😊\n\nGracias por preguntar. ¿En qué te puedo ayudar hoy?", default_suggestions()
+
+    if intent == "saludo":
+        return "¡Hola! 👋\n\nAcá estoy para ayudarte. ¿Qué querés consultar?", default_suggestions()
+
+    if intent == "tipo_de_preguntas_que_responde":
+        faq = get_faq("preguntas")
+        if faq:
+            return faq.answer, single_follow_up(faq.follow_ups)
+
+    if intent == "implementacion_nivora":
+        return (
+            "La implementación suele tardar entre 24 y 72 horas 👍\n\n"
+            "Depende del plan elegido y de la complejidad de tu tienda, pero la idea es dejarlo funcionando lo antes posible para que puedas empezar a usarlo sin demoras.\n\n"
+            "Si querés, también podés ver qué plan se adapta mejor a tu tienda en la pestaña Precios."
+        ), ["Precios"]
+
+    if intent == "envio_por_ubicacion" and location:
+        return build_location_shipping_reply(location), ["Precios"]
+
+    if intent == "precio":
+        return (
+            "Podés ver todos los precios en la pestaña 'Precios' 👍\n\n"
+            "Ahí vas a encontrar los planes disponibles para elegir el que mejor se adapte a tu tienda y a lo que necesitás hoy.\n\n"
+            "Si querés, te contamos cuál encaja mejor según tu caso."
+        ), ["Precios"]
+
+    if intent == "consultas_internacionales":
+        return build_international_reply(location), []
+
+    if intent == "funciona_realmente":
+        return (
+            "Sí, funciona 👍\n\n"
+            "La idea es responder en el momento justo, cuando el cliente está por decidir, y eso ayuda mucho a aumentar conversiones.\n\n"
+            "Muchos negocios pierden ventas solo por no responder a tiempo, y esto viene justamente a resolver eso."
+        ), ["¿Qué beneficios tiene?"]
+
+    if intent == "tipo_de_tienda":
+        return (
+            "Sí, se puede adaptar a todo tipo de tiendas 👍\n\n"
+            "Se integra según tu negocio y se ajusta a lo que vendés, para responder dudas reales de tus clientes.\n\n"
+            "La idea es que encaje con tu tienda y acompañe la compra de forma natural."
+        ), ["¿Cómo funciona en una tienda?"]
+
+    if intent == "stock":
+        faq = get_faq("stock_simple")
+        if faq:
+            return faq.answer, single_follow_up(faq.follow_ups)
+
+    if intent == "uso":
+        faq = get_faq("uso_simple")
+        if faq:
+            return faq.answer, single_follow_up(faq.follow_ups)
+
+    if intent == "cambios":
+        faq = get_faq("cambios_simple")
+        if faq:
+            return faq.answer, single_follow_up(faq.follow_ups)
+
+    if intent == "personalizacion_bot":
+        faq = get_faq("personalizacion_tono")
+        if faq:
+            return faq.answer, single_follow_up(faq.follow_ups)
+
+    if intent == "agradecimiento":
+        return "¡De nada! 😊\n\nSi querés, podés preguntarme otra cosa.", default_suggestions()
+
+    return FALLBACK, single_follow_up(default_suggestions())
+
+
+def build_reply(message: str) -> tuple[str, List[str]]:
+    intent, confidence, location = detect_intent(message)
+    print("INTENT:", intent, "CONFIDENCE:", confidence, "LOCATION:", location)
+
+    if confidence == "baja":
+        return generate_response("desconocido")
+
+    return generate_response(intent, location)
+
+
+@app.get("/")
+def home():
+    return render_template_string(HOME_HTML, brand_name=BRAND_NAME)
+
+
+@app.get("/health")
+def health():
+    return jsonify({"ok": True, "service": BRAND_NAME})
+
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    return response
+
+
+@app.get("/config")
+def config():
+    return jsonify(
+        {
+            "brand_name": BRAND_NAME,
+            "primary_color": PRIMARY_COLOR,
+            "secondary_color": SECONDARY_COLOR,
+            "quick_replies": default_suggestions(),
+            "support_email": SUPPORT_EMAIL,
+            "greeting": GREETING,
+        }
+    )
+
+
+@app.route("/chat", methods=["POST", "OPTIONS"])
+def chat():
+    if request.method == "OPTIONS":
+        return Response(status=204)
+
+    data = request.get_json(silent=True) or {}
+    message = str(data.get("message", "")).strip()
+
+    print("USER:", message)
+    
+    if not message:
+        return jsonify({"reply": "Escribime tu consulta y te ayudo.", "suggestions": default_suggestions()}), 400
+
+    reply, suggestions = build_reply(message)
+    return jsonify({"reply": reply, "suggestions": suggestions})
+
+
+@app.get("/widget")
+def widget():
+    return render_template_string(
+        WIDGET_HTML,
+        brand_name=BRAND_NAME,
+        primary_color=PRIMARY_COLOR,
+        secondary_color=SECONDARY_COLOR,
+        support_email=SUPPORT_EMAIL,
+    )
+
+
+@app.get("/widget.js")
+def widget_js():
+    base_url = request.host_url.rstrip("/")
+    script = WIDGET_JS.replace("__BASE_URL__", base_url)
+    return Response(script, mimetype="application/javascript")
+
+
+HOME_HTML = """
+<!doctype html>
+<html lang="es">
 <head>
-<title>Polymarket Bot v2</title>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0;padding:20px;max-width:900px;margin:0 auto}
-h1{font-size:18px;font-weight:500;margin-bottom:3px}
-.sub{font-size:12px;color:#555;margin-bottom:18px}
-.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
-.metric{background:#111;border-radius:10px;padding:12px}
-.metric-label{font-size:10px;color:#555;margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em}
-.metric-value{font-size:20px;font-weight:500}
-.positive{color:#4caf50}.negative{color:#f44336}.neutral{color:#888}
-.card{background:#111;border-radius:10px;padding:14px;margin-bottom:10px;border:1px solid #1a1a1a}
-.market-q{font-size:13px;font-weight:500;margin-bottom:8px;line-height:1.4}
-.bar-track{height:5px;background:#1e1e1e;border-radius:3px;overflow:hidden;margin-bottom:3px}
-.bar-fill{height:100%;border-radius:3px}
-.bar-labels{display:flex;justify-content:space-between;font-size:11px;margin-bottom:8px}
-.btn{padding:5px 14px;border-radius:7px;border:1px solid #2a2a2a;background:transparent;color:#e0e0e0;cursor:pointer;font-size:11px}
-.btn:hover{background:#1a1a1a}
-.btn-primary{background:#e0e0e0;color:#0a0a0a;border-color:#e0e0e0;font-weight:500}
-.btn-primary:hover{opacity:.85}
-.row{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
-.bet-row{padding:10px 0;border-bottom:1px solid #1a1a1a;font-size:12px}
-.bet-row:last-child{border-bottom:none}
-.bet-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px}
-.bet-meta{font-size:10px;color:#444;margin-top:3px}
-.bet-q{flex:1;min-width:100px;font-size:12px;line-height:1.3}
-.badge{font-size:10px;padding:2px 8px;border-radius:5px;font-weight:500;white-space:nowrap}
-.yes{background:#0f2e0f;color:#4caf50}.no{background:#2e0f0f;color:#f44336}
-.b-open{background:#1a1a1a;color:#555}.b-won{background:#0f2e0f;color:#4caf50}.b-lost{background:#2e0f0f;color:#f44336}
-.edge-badge{background:#1a1a2e;color:#7b7bff;font-size:10px;padding:2px 7px;border-radius:5px}
-.dot{width:7px;height:7px;border-radius:50%;background:#4caf50;display:inline-block;margin-right:7px;animation:pulse 2s infinite}
-.section-title{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.08em;margin:14px 0 6px}
-.empty{color:#444;font-size:12px}
-.reasoning-text{font-size:11px;color:#555;margin-top:5px;font-style:italic}
-.signal-text{font-size:10px;color:#3a6ea5;margin-top:3px}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-@media(max-width:500px){.metrics{grid-template-columns:repeat(2,1fr)}}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ brand_name }} Demo</title>
+  <style>
+    :root{
+      --bg:#07090f;
+      --bg-2:#0d1320;
+      --panel:rgba(13,18,30,.88);
+      --line:rgba(255,255,255,.08);
+      --text:#f7f8fc;
+      --muted:#98a2b3;
+      --accent:#d6c29a;
+      --user:#131a29;
+      --bot:rgba(255,255,255,.05);
+      --shadow:0 30px 80px rgba(0,0,0,.42);
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      min-height:100vh;
+      display:grid;
+      place-items:center;
+      padding:32px 16px;
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      background:
+        radial-gradient(circle at 15% 20%, rgba(214,194,154,.11), transparent 24%),
+        radial-gradient(circle at 82% 14%, rgba(99,102,241,.12), transparent 22%),
+        linear-gradient(180deg, #05070c 0%, #0a0d15 50%, #06080f 100%);
+      color:var(--text);
+    }
+    .demo-shell{
+      width:min(100%, 960px);
+      display:grid;
+      gap:18px;
+      justify-items:center;
+    }
+    .demo-kicker{
+      color:#e7d8b8;
+      font-size:13px;
+      font-weight:600;
+      letter-spacing:.14em;
+      text-transform:uppercase;
+    }
+    .demo-chat{
+      width:min(100%, 720px);
+      min-height:680px;
+      display:flex;
+      flex-direction:column;
+      border:1px solid var(--line);
+      border-radius:30px;
+      overflow:hidden;
+      background:
+        radial-gradient(circle at top, rgba(214,194,154,.08), transparent 28%),
+        linear-gradient(180deg, rgba(16,21,34,.96), rgba(9,12,20,.98));
+      box-shadow:var(--shadow);
+    }
+    .demo-header{
+      padding:22px 24px 18px;
+      border-bottom:1px solid rgba(255,255,255,.06);
+      background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
+    }
+    .demo-title{
+      margin:0;
+      font-size:15px;
+      font-weight:700;
+      letter-spacing:-.02em;
+    }
+    .demo-status{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      margin-top:7px;
+      color:var(--muted);
+      font-size:12.5px;
+    }
+    .demo-status::before{
+      content:"";
+      width:8px;
+      height:8px;
+      border-radius:999px;
+      background:#53d38b;
+      box-shadow:0 0 12px rgba(83,211,139,.4);
+    }
+    .demo-messages{
+      flex:1;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      padding:22px 18px 18px;
+      overflow:auto;
+    }
+    .msg{
+      max-width:82%;
+      padding:14px 16px;
+      border-radius:20px;
+      line-height:1.6;
+      font-size:14px;
+      animation:fadeUp .28s ease;
+    }
+    .msg.bot{
+      align-self:flex-start;
+      background:var(--bot);
+      border:1px solid rgba(255,255,255,.07);
+      color:var(--text);
+      border-top-left-radius:10px;
+    }
+    .msg.user{
+      align-self:flex-end;
+      background:linear-gradient(135deg, #151d2d, #1b2436);
+      border:1px solid rgba(255,255,255,.06);
+      color:#fff;
+      border-top-right-radius:10px;
+    }
+    .quick-replies{
+      display:flex;
+      flex-wrap:wrap;
+      gap:10px;
+      padding:0 18px 18px;
+    }
+    .quick-replies button{
+      border:1px solid rgba(255,255,255,.08);
+      background:rgba(255,255,255,.04);
+      color:#f4f6fb;
+      border-radius:999px;
+      padding:10px 14px;
+      font-size:12.5px;
+      font-weight:600;
+      cursor:pointer;
+      transition:transform .2s ease, border-color .2s ease, background .2s ease;
+    }
+    .quick-replies button:hover{
+      transform:translateY(-1px);
+      border-color:rgba(214,194,154,.22);
+      background:rgba(255,255,255,.06);
+    }
+    .demo-input{
+      display:flex;
+      gap:10px;
+      padding:16px 18px 18px;
+      border-top:1px solid rgba(255,255,255,.06);
+      background:rgba(255,255,255,.02);
+    }
+    .demo-input input{
+      flex:1;
+      border:1px solid rgba(255,255,255,.08);
+      border-radius:999px;
+      padding:13px 15px;
+      background:rgba(255,255,255,.03);
+      color:var(--text);
+      outline:none;
+    }
+    .demo-input input::placeholder{
+      color:var(--muted);
+    }
+    .demo-input button{
+      border:1px solid rgba(214,194,154,.24);
+      border-radius:999px;
+      padding:13px 16px;
+      background:linear-gradient(135deg, rgba(214,194,154,.95), rgba(241,232,205,.98));
+      color:#0b0d13;
+      font-weight:700;
+      cursor:pointer;
+    }
+    @keyframes fadeUp{
+      from{opacity:0;transform:translateY(8px)}
+      to{opacity:1;transform:translateY(0)}
+    }
+    @media (max-width: 760px){
+      body{padding:16px 10px}
+      .demo-chat{
+        min-height:72vh;
+        border-radius:24px;
+      }
+      .msg{
+        max-width:90%;
+      }
+      .quick-replies{
+        flex-direction:column;
+      }
+      .quick-replies button,
+      .demo-input button{
+        width:100%;
+      }
+      .demo-input{
+        flex-direction:column;
+      }
+    }
+  </style>
 </head>
 <body>
-<h1>Polymarket Bot v2</h1>
-<div class="sub">Paper trading · Kelly Criterion · Dual Claude · Multi-signal</div>
-<div class="metrics">
-  <div class="metric"><div class="metric-label">Saldo</div><div class="metric-value" id="balance">$10000</div></div>
-  <div class="metric"><div class="metric-label">P&L Total</div><div class="metric-value" id="pnl">$0</div></div>
-  <div class="metric"><div class="metric-label">Abiertas</div><div class="metric-value" id="open-count">0</div></div>
-  <div class="metric"><div class="metric-label">Win rate</div><div class="metric-value" id="winrate">—</div></div>
-  <div class="metric"><div class="metric-label">Ganadas</div><div class="metric-value positive" id="won">0</div></div>
-  <div class="metric"><div class="metric-label">Perdidas</div><div class="metric-value negative" id="lost">0</div></div>
-  <div class="metric"><div class="metric-label">Edge medio</div><div class="metric-value" id="avg-edge">—</div></div>
-  <div class="metric"><div class="metric-label">P&L USDC</div><div class="metric-value" id="total-pnl">0</div></div>
-</div>
-<div class="card">
-  <div class="row">
-    <div><span class="dot"></span><span id="bot-status">Bot v2 listo</span></div>
-    <div style="display:flex;gap:6px;flex-wrap:wrap">
-      <button class="btn" onclick="loadMarkets()">Actualizar</button>
-      <button class="btn" onclick="doMonitor()">Monitor</button>
-      <button class="btn btn-primary" onclick="botBet()">🧠 Apostar con IA</button>
+  <div class="demo-shell">
+    <div class="demo-kicker">Así responde en tu tienda</div>
+
+    <div class="demo-chat">
+      <div class="demo-header">
+        <p class="demo-title">Asistente</p>
+        <div class="demo-status">En línea</div>
+      </div>
+
+      <div id="messages" class="demo-messages">
+        <div class="msg bot">Hola 👋 ¿En qué puedo ayudarte?</div>
+      </div>
+
+      <div id="quickReplies" class="quick-replies">
+        <button type="button" data-question="¿Qué tipo de preguntas responde?">¿Qué tipo de preguntas responde?</button>
+        <button type="button" data-question="¿Cuánto tarda el envío?">¿Cuánto tarda el envío?</button>
+        <button type="button" data-question="¿Sirve para mi caso?">¿Sirve para mi caso?</button>
+      </div>
+
+      <div class="demo-input">
+        <input id="demoInput" type="text" placeholder="Escribí tu consulta..." />
+        <button id="demoSend" type="button">Enviar</button>
+      </div>
     </div>
   </div>
-  <div class="reasoning-text" id="reasoning"></div>
-  <div class="signal-text" id="signal-info"></div>
-</div>
-<div class="section-title">Mercados activos</div>
-<div id="markets"><div class="empty">Cargando...</div></div>
-<div class="section-title">Mis apuestas</div>
-<div class="card" id="bets"><div class="empty">Sin apuestas todavía.</div></div>
+
+  <script>
+    const messagesEl = document.getElementById("messages");
+    const quickRepliesEl = document.getElementById("quickReplies");
+    const inputEl = document.getElementById("demoInput");
+    const sendBtn = document.getElementById("demoSend");
+
+    function addMessage(text, who) {
+      const el = document.createElement("div");
+      el.className = "msg " + who;
+      el.textContent = text;
+      messagesEl.appendChild(el);
+      messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
+    }
+
+    function renderQuickReplies(items) {
+      quickRepliesEl.innerHTML = "";
+      (items || []).forEach((item) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = item;
+        btn.addEventListener("click", () => sendMessage(item));
+        quickRepliesEl.appendChild(btn);
+      });
+    }
+
+    async function loadConfig() {
+      const res = await fetch("/config");
+      const config = await res.json();
+      messagesEl.innerHTML = "";
+      addMessage(config.greeting || "Hola 👋 ¿En qué puedo ayudarte?", "bot");
+      renderQuickReplies(config.quick_replies || []);
+    }
+
+    async function sendMessage(message) {
+      const text = (message ?? inputEl.value).trim();
+      if (!text) return;
+
+      addMessage(text, "user");
+      inputEl.value = "";
+      renderQuickReplies([]);
+
+      try {
+        const res = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text })
+        });
+        const data = await res.json();
+        window.setTimeout(() => {
+          addMessage(data.reply || "No tengo una respuesta precisa para eso en este demo 😊", "bot");
+          renderQuickReplies((data.suggestions || []).slice(0, 1));
+        }, 260);
+      } catch (error) {
+        window.setTimeout(() => {
+          addMessage("No pude responder en este momento. Intentá de nuevo en unos segundos.", "bot");
+          renderQuickReplies(["¿Qué tipo de preguntas responde?"]);
+        }, 260);
+      }
+    }
+
+    sendBtn.addEventListener("click", () => sendMessage());
+    inputEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+      }
+    });
+
+    loadConfig();
+  </script>
+</body>
+</html>
+"""
+
+
+WIDGET_HTML = """
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ brand_name }} Chat</title>
+  <style>
+    :root {
+      --primary: {{ primary_color }};
+      --secondary: {{ secondary_color }};
+      --bg: #f5f7fb;
+      --surface: rgba(255, 255, 255, 0.96);
+      --surface-soft: rgba(248, 250, 252, 0.92);
+      --text: #0f172a;
+      --muted: #667085;
+      --border: rgba(15, 23, 42, 0.08);
+      --border-strong: rgba(15, 23, 42, 0.12);
+      --bubble-bot: #ffffff;
+      --bubble-user: #111827;
+      --shadow: 0 24px 80px rgba(15, 23, 42, 0.14);
+      --shadow-soft: 0 10px 30px rgba(15, 23, 42, 0.08);
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      background:linear-gradient(180deg, #f7f9fc 0%, #eef3f8 100%);
+      color:var(--text)
+    }
+    .chat{
+      display:flex;
+      flex-direction:column;
+      height:100vh;
+      background:
+        radial-gradient(circle at top right, rgba(6,182,212,.08), transparent 22%),
+        linear-gradient(180deg, rgba(255,255,255,.98), rgba(247,249,252,.98));
+    }
+    .header{
+      position: relative;
+      padding:18px 18px 16px;
+      background:
+        linear-gradient(135deg, rgba(15,23,42,.96), rgba(17,24,39,.92)),
+        linear-gradient(135deg,var(--primary),var(--secondary));
+      color:#fff;
+      border-bottom:1px solid rgba(255,255,255,.08);
+    }
+    .header::after{
+      content:"";
+      position:absolute;
+      inset:auto 18px 0 18px;
+      height:1px;
+      background:linear-gradient(90deg, transparent, rgba(255,255,255,.22), transparent);
+    }
+    .close-btn{
+      position:absolute;
+      top:14px;
+      right:14px;
+      width:34px;
+      height:34px;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      background:rgba(255,255,255,.08);
+      border:1px solid rgba(255,255,255,.1);
+      border-radius:999px;
+      color:#fff;
+      font-size:16px;
+      line-height:1;
+      cursor:pointer;
+      transition:background .2s ease, transform .2s ease, border-color .2s ease;
+    }
+    .close-btn:hover{
+      background:rgba(255,255,255,.14);
+      border-color:rgba(255,255,255,.18);
+      transform:translateY(-1px);
+    }
+    .header-title{
+      font-size:15px;
+      font-weight:700;
+      letter-spacing:-0.02em;
+    }
+    .header-sub{
+      max-width:260px;
+      font-size:12.5px;
+      line-height:1.45;
+      opacity:.78;
+      margin-top:6px
+    }
+    .messages{
+      flex:1;
+      overflow:auto;
+      padding:16px 16px;
+      background:transparent;
+      scroll-behavior:smooth;
+    }
+    .messages::-webkit-scrollbar{width:10px}
+    .messages::-webkit-scrollbar-thumb{
+      background:rgba(15,23,42,.12);
+      border:3px solid transparent;
+      border-radius:999px;
+      background-clip:padding-box;
+    }
+    .msg{
+      max-width:87%;
+      padding:13px 15px;
+      border-radius:18px;
+      margin:8px 0;
+      line-height:1.58;
+      white-space:pre-wrap;
+      font-size:14px;
+      box-shadow:var(--shadow-soft);
+      overflow:visible;
+    }
+    .bot{
+      background:var(--bubble-bot);
+      border:1px solid var(--border);
+      border-top-left-radius:8px;
+      color:var(--text);
+    }
+    .user{
+      background:linear-gradient(135deg, #111827, #1f2937);
+      color:#fff;
+      margin-left:auto;
+      border-top-right-radius:8px;
+      box-shadow:0 12px 28px rgba(17,24,39,.18);
+    }
+    .quick{
+      padding:10px 12px 8px;
+      background:rgba(255,255,255,.82);
+      backdrop-filter:blur(12px);
+      border-top:1px solid var(--border);
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap
+    }
+    .quick button{
+      border:1px solid rgba(15,23,42,.08);
+      border-radius:999px;
+      padding:8px 11px;
+      background:rgba(255,255,255,.92);
+      color:#0f172a;
+      cursor:pointer;
+      font-size:12px;
+      font-weight:600;
+      letter-spacing:-0.01em;
+      box-shadow:0 6px 18px rgba(15,23,42,.05);
+      transition:transform .2s ease, box-shadow .2s ease, border-color .2s ease, background .2s ease;
+    }
+    .quick button:hover{
+      transform:translateY(-1px);
+      border-color:rgba(15,23,42,.14);
+      box-shadow:0 10px 24px rgba(15,23,42,.08);
+      background:#fff;
+    }
+    .composer{
+      display:flex;
+      gap:8px;
+      padding:11px 12px;
+      background:rgba(255,255,255,.9);
+      backdrop-filter:blur(14px);
+      border-top:1px solid var(--border)
+    }
+    .composer input{
+      flex:1;
+      border:1px solid var(--border);
+      border-radius:999px;
+      padding:11px 14px;
+      font-size:14px;
+      background:rgba(248,250,252,.92);
+      color:var(--text);
+      outline:none;
+      transition:border-color .2s ease, box-shadow .2s ease, background .2s ease;
+    }
+    .composer input:focus{
+      border-color:rgba(6,182,212,.35);
+      box-shadow:0 0 0 4px rgba(6,182,212,.08);
+      background:#fff;
+    }
+    .composer button{
+      border:none;
+      border-radius:999px;
+      padding:11px 16px;
+      background:linear-gradient(135deg, var(--primary), var(--secondary));
+      color:#fff;
+      font-weight:700;
+      cursor:pointer;
+      letter-spacing:-0.01em;
+      box-shadow:0 12px 28px rgba(15,23,42,.18);
+      transition:transform .2s ease, box-shadow .2s ease, filter .2s ease;
+    }
+    .composer button:hover{
+      transform:translateY(-1px);
+      filter:brightness(1.02);
+      box-shadow:0 16px 34px rgba(15,23,42,.22);
+    }
+    .footer{
+      padding:8px 12px 10px;
+      font-size:11px;
+      line-height:1.5;
+      color:var(--muted);
+      background:rgba(255,255,255,.88);
+      border-top:1px solid var(--border)
+    }
+    a{color:inherit}
+    @media (max-width: 600px){
+      .header{padding:18px 16px 15px}
+      .header-sub{max-width:100%;padding-right:36px}
+      .messages{padding:14px 12px}
+      .msg{max-width:90%;font-size:13.5px}
+      .quick{padding:9px 10px 8px}
+      .quick button{font-size:11.5px;padding:7px 10px}
+      .composer{padding:10px}
+      .composer input{font-size:16px}
+      .close-btn{top:12px;right:12px}
+    }
+  </style>
+</head>
+<body>
+  <div class="chat">
+    <div class="header">
+        <button id="closeBtn" class="close-btn">✕</button>
+        <div class="header-title">{{ brand_name }}</div>
+        <div class="header-sub">Asistente de ventas y atención para ecommerce</div>
+    </div>
+
+    <div id="messages" class="messages"></div>
+
+    <div class="quick" id="quickReplies"></div>
+
+    <div class="composer">
+      <input id="messageInput" type="text" placeholder="Escribí tu consulta..." />
+      <button id="sendBtn">Enviar</button>
+    </div>
+
+    <div class="footer">
+      Atención personalizada: <a href="mailto:{{ support_email }}">{{ support_email }}</a>
+    </div>
+  </div>
 
 <script>
-async function loadMetrics(){
-  const d = await fetch("/metrics").then(r=>r.json());
-  document.getElementById("balance").textContent = "$"+Math.round(d.balance);
-  const pnl = d.balance - 10000;
-  const el = document.getElementById("pnl");
-  el.textContent = (pnl>=0?"+":"")+Math.round(pnl);
-  el.className = "metric-value "+(pnl>0?"positive":pnl<0?"negative":"neutral");
-  document.getElementById("open-count").textContent = d.open;
-  document.getElementById("winrate").textContent = d.winrate;
-  document.getElementById("won").textContent = d.won||0;
-  document.getElementById("lost").textContent = d.lost||0;
-  document.getElementById("avg-edge").textContent = d.avg_edge||"—";
-  const tpnl = document.getElementById("total-pnl");
-  tpnl.textContent = (d.total_pnl>=0?"+":"")+Math.round(d.total_pnl);
-  tpnl.className = "metric-value "+(d.total_pnl>0?"positive":d.total_pnl<0?"negative":"neutral");
-}
-async function loadMarkets(){
-  document.getElementById("markets").innerHTML="<div class='empty'>Cargando...</div>";
-  const d = await fetch("/markets").then(r=>r.json());
-  if(!d.length){document.getElementById("markets").innerHTML="<div class='empty'>Sin mercados.</div>";return;}
-  document.getElementById("markets").innerHTML = d.map(m=>{
-    const c = m.prob>50?"#4caf50":"#ff9800";
-    return `<div class='card'><div class='market-q'>${m.question}</div>
-    <div class='bar-track'><div class='bar-fill' style='width:${m.prob}%;background:${c}'></div></div>
-    <div class='bar-labels'><span style='color:${c}'>SI ${m.prob}%</span><span style='color:#444'>NO ${100-m.prob}%</span></div>
-    <div class='row'><span style='font-size:11px;color:#444'>${m.volume}</span></div></div>`;
-  }).join("");
-}
-async function botBet(){
-  document.getElementById("bot-status").textContent="🧠 Haiku filtrando → Sonnet analizando...";
-  document.getElementById("reasoning").textContent="";
-  document.getElementById("signal-info").textContent="";
-  const d = await fetch("/bot-bet",{method:"POST"}).then(r=>r.json());
-  document.getElementById("bot-status").textContent = d.message;
-  if(d.reasoning) document.getElementById("reasoning").textContent = "Razonamiento: "+d.reasoning;
-  if(d.sources||d.key_signal) document.getElementById("signal-info").textContent =
-    "Fuentes: "+(d.sources||"—")+(d.key_signal?" · Señal clave: "+d.key_signal:"");
-  await loadMetrics(); await loadBets();
-}
-async function doMonitor(){
-  document.getElementById("bot-status").textContent="Monitoreando posiciones abiertas...";
-  await fetch("/monitor",{method:"POST"});
-  document.getElementById("bot-status").textContent="Monitor ejecutado";
-  await loadMetrics(); await loadBets();
-}
-async function loadBets(){
-  const d = await fetch("/bets").then(r=>r.json());
-  if(!d.length){document.getElementById("bets").innerHTML="<div class='empty'>Sin apuestas todavía.</div>";return;}
-  document.getElementById("bets").innerHTML = d.map(b=>{
-    const pnlClass = b.pnl>0?"positive":b.pnl<0?"negative":"neutral";
-    const sideClass = b.side==="SI"?"yes":"no";
-    const stClass = "b-"+b.status;
-    return `<div class='bet-row'>
-      <div class='bet-main'>
-        <div class='bet-q'>${b.question}</div>
-        <span class='badge ${sideClass}'>${b.side}</span>
-        <span style='color:#555'>$${b.amount}</span>
-        <span class='edge-badge'>edge ${b.edge}pp</span>
-        <span style='color:#555;font-size:10px'>conf ${b.confidence}/10</span>
-        <span style='color:#888;font-size:10px'>entrada ${b.prob_market ? (b.prob_market*100).toFixed(0)+"%" : "—"}</span>
-        <span class='${pnlClass}' style='font-weight:500'>${b.pnl_text}</span>
-        <span class='badge ${stClass}'>${b.status_text}</span>
-      </div>
-      ${b.reasoning?`<div class='bet-meta'>💬 ${b.reasoning}</div>`:""}
-      ${b.sources?`<div class='bet-meta' style='color:#3a4a5a'>📡 ${b.sources}</div>`:""}
-    </div>`;
-  }).join("");
-}
-loadMarkets(); loadMetrics(); loadBets();
-setInterval(()=>{loadMetrics();loadBets();}, 10000);
+  const messagesEl = document.getElementById('messages');
+  const quickRepliesEl = document.getElementById('quickReplies');
+  const inputEl = document.getElementById('messageInput');
+  const sendBtn = document.getElementById('sendBtn');
+
+  function addMessage(text, who) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + who;
+    el.textContent = text;
+    messagesEl.appendChild(el);
+    requestAnimationFrame(() => {
+      if (who === 'bot') {
+        const targetTop = Math.max(0, el.offsetTop - 8);
+        messagesEl.scrollTo({ top: targetTop, behavior: 'smooth' });
+      } else {
+        messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
+      }
+    });
+  }
+
+  function renderQuickReplies(items) {
+    quickRepliesEl.innerHTML = '';
+    (items || []).forEach((item) => {
+      const btn = document.createElement('button');
+      btn.textContent = item;
+      btn.onclick = () => sendMessage(item);
+      quickRepliesEl.appendChild(btn);
+    });
+  }
+
+  async function loadConfig() {
+    const res = await fetch('/config');
+    const config = await res.json();
+    renderQuickReplies(config.quick_replies || []);
+    addMessage(config.greeting || `Hola, soy el asistente de ${config.brand_name}. ¿En qué puedo ayudarte?`, 'bot');
+  }
+
+  async function sendMessage(message) {
+    const text = (message ?? inputEl.value).trim();
+    if (!text) return;
+    addMessage(text, 'user');
+    inputEl.value = '';
+
+    try {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text })
+      });
+      const data = await res.json();
+      addMessage(data.reply || 'Hubo un error al responder.', 'bot');
+      renderQuickReplies(data.suggestions || []);
+    } catch (err) {
+      addMessage('Hubo un problema al responder. Intentá de nuevo en unos segundos.', 'bot');
+    }
+  }
+
+  sendBtn.addEventListener('click', () => sendMessage());
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sendMessage();
+  });
+
+  loadConfig();
+document.getElementById('closeBtn').addEventListener('click', function () {
+  window.parent.postMessage('closeChat', '*');
+});
 </script>
 </body>
-</html>"""
+</html>
+"""
 
-@app.route("/setup-db")
-def setup_db():
-    try:
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE bets (
-                id TEXT PRIMARY KEY,
-                question TEXT,
-                market_id TEXT,
-                side TEXT,
-                amount REAL,
-                prob_market REAL,
-                prob_claude REAL,
-                edge REAL,
-                confidence INTEGER,
-                kelly_f REAL,
-                status TEXT DEFAULT 'open',
-                pnl REAL DEFAULT 0,
-                reasoning TEXT,
-                sources_used TEXT,
-                price_entry REAL,
-                price_current REAL,
-                take_profit_hit BOOLEAN DEFAULT FALSE,
-                stop_loss_hit BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                resolved_at TIMESTAMPTZ
-            )
-        """)
-        conn.commit(); cur.close(); conn.close()
-        return "Tabla creada OK"
-    except Exception as e:
-        return f"Error: {e}"
-@app.route("/debug")
-def debug():
-    try:
-        r = requests.get(f"{GAMMA_API}/markets?closed=false&limit=500", timeout=8)
-        data = r.json()
-        markets = data if isinstance(data, list) else data.get("markets",[])
-        total = len(markets)
-        active = [m for m in markets if m.get("active") and not m.get("closed")]
-        no_sports = [m for m in active if not any(x in m.get("question","").lower() for x in SPORTS_FILTER)]
-        in_range = []
-        for m in no_sports:
-            try:
-                prices = m.get("outcomePrices","")
-                if isinstance(prices, str): prices = json.loads(prices)
-                prob = float(prices[0])
-                vol = float(m.get("volume",0))
-                if 0.15 < prob < 0.85 and vol > 100:
-                    in_range.append(m.get("question","")[:60])
-            except: continue
-        return jsonify({
-            "total": total,
-            "active": len(active),
-            "no_sports": len(no_sports),
-            "pass_filters": len(in_range),
-            "examples": in_range[:5]
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)})
-@app.route("/clear-open", methods=["POST"])
-def clear_open():
-    try:
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("UPDATE state SET value='10000.0' WHERE key='balance'")
-        cur.execute("UPDATE state SET value='0' WHERE key='won'")
-        cur.execute("UPDATE state SET value='0' WHERE key='lost'")
-        conn.commit(); cur.close(); conn.close()
-        return jsonify({"ok": True, "message": "Apuestas viejas cerradas"})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
-@app.route("/")
-def index():
-    return render_template_string(HTML)
 
-@app.route("/test-metaculus")
-def test_metaculus():
-    try:
-        r = requests.get(
-            "https://www.metaculus.com/api2/questions/",
-            params={"search": "Orban Hungary", "status": "open", "limit": 3},
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Token {METACULUS_API_KEY}"
-            },
-            timeout=8
-        )
-        return jsonify({"status": r.status_code, "raw": r.json()})
-    except Exception as e:
-        return jsonify({"error": str(e)})
+WIDGET_JS = r"""
+(function () {
+  if (window.__ACQUALUME_BOT_LOADED__) return;
+  window.__ACQUALUME_BOT_LOADED__ = true;
 
-@app.route("/test-wiki")
-def test_wiki():
-    text, score = get_wikipedia_signal("Will Viktor Orban be Prime Minister of Hungary")
-    return jsonify({"text": text, "score": score})
-    
+  var baseUrl = "__BASE_URL__";
+
+  var style = document.createElement('style');
+  style.textContent = [
+    '@keyframes nivoraPulse {',
+    '  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.45); }',
+    '  50% { transform: scale(1.06); box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }',
+    '}',
+    '@keyframes nivoraTyping {',
+    '  0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }',
+    '  40% { opacity: 1; transform: translateY(-2px); }',
+    '}'
+  ].join('');
+  document.head.appendChild(style);
+
+  var launcher = document.createElement('div');
+  launcher.style.position = 'fixed';
+  launcher.style.right = '20px';
+  launcher.style.bottom = '20px';
+  launcher.style.display = 'flex';
+  launcher.style.alignItems = 'flex-end';
+  launcher.style.gap = '10px';
+  launcher.style.flexDirection = 'row-reverse';
+  launcher.style.zIndex = '999999';
+  launcher.style.opacity = '0';
+  launcher.style.transform = 'translateY(14px)';
+  launcher.style.transition = 'opacity .45s ease, transform .45s ease';
+
+  var teaser = document.createElement('button');
+  teaser.type = 'button';
+  teaser.setAttribute('aria-label', 'Abrir chat');
+  teaser.style.display = 'flex';
+  teaser.style.flexDirection = 'column';
+  teaser.style.alignItems = 'flex-start';
+  teaser.style.gap = '8px';
+  teaser.style.maxWidth = '220px';
+  teaser.style.padding = '14px 16px';
+  teaser.style.border = '1px solid rgba(255,255,255,0.08)';
+  teaser.style.borderRadius = '22px 22px 22px 8px';
+  teaser.style.background = 'linear-gradient(180deg, rgba(18,24,38,0.96), rgba(12,16,27,0.96))';
+  teaser.style.color = '#f8fafc';
+  teaser.style.boxShadow = '0 18px 42px rgba(15,23,42,0.22)';
+  teaser.style.cursor = 'pointer';
+  teaser.style.textAlign = 'left';
+  teaser.style.backdropFilter = 'blur(14px)';
+  teaser.style.transition = 'transform .22s ease, box-shadow .22s ease, border-color .22s ease';
+  teaser.style.borderRadius = '22px 22px 8px 22px';
+
+  var typing = document.createElement('div');
+  typing.style.display = 'flex';
+  typing.style.gap = '4px';
+
+  ['0s', '.15s', '.3s'].forEach(function (delay) {
+    var dot = document.createElement('span');
+    dot.style.width = '6px';
+    dot.style.height = '6px';
+    dot.style.borderRadius = '999px';
+    dot.style.background = 'rgba(214,194,154,0.88)';
+    dot.style.animation = 'nivoraTyping 1.4s infinite';
+    dot.style.animationDelay = delay;
+    typing.appendChild(dot);
+  });
+
+  var teaserText = document.createElement('div');
+  teaserText.textContent = 'Estoy para ayudarte 👍';
+  teaserText.style.fontSize = '14px';
+  teaserText.style.fontWeight = '600';
+  teaserText.style.lineHeight = '1.45';
+  teaserText.style.letterSpacing = '-0.01em';
+
+  teaser.appendChild(typing);
+  teaser.appendChild(teaserText);
+
+  var avatar = document.createElement('button');
+  avatar.type = 'button';
+  avatar.setAttribute('aria-label', 'Abrir chat');
+  avatar.style.position = 'relative';
+  avatar.style.width = '62px';
+  avatar.style.height = '62px';
+  avatar.style.border = '1px solid rgba(255,255,255,0.14)';
+  avatar.style.borderRadius = '999px';
+  avatar.style.background = 'linear-gradient(135deg, #111827, #1f2937 58%, #5b63ff 140%)';
+  avatar.style.color = '#fff';
+  avatar.style.fontSize = '20px';
+  avatar.style.fontWeight = '700';
+  avatar.style.letterSpacing = '-0.03em';
+  avatar.style.cursor = 'pointer';
+  avatar.style.boxShadow = '0 18px 40px rgba(15,23,42,.2)';
+  avatar.style.transition = 'transform .22s ease, box-shadow .22s ease, filter .22s ease';
+  avatar.innerHTML = [
+    '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">',
+    '<path d="M7 8.75C7 7.50736 8.00736 6.5 9.25 6.5H14.75C15.9926 6.5 17 7.50736 17 8.75V12.25C17 13.4926 15.9926 14.5 14.75 14.5H11.9L9.2 17V14.5H9.25C8.00736 14.5 7 13.4926 7 12.25V8.75Z" stroke="white" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>',
+    '</svg>'
+  ].join('');
+
+  var badge = document.createElement('span');
+  badge.textContent = '1';
+  badge.style.position = 'absolute';
+  badge.style.top = '-1px';
+  badge.style.right = '-1px';
+  badge.style.width = '22px';
+  badge.style.height = '22px';
+  badge.style.display = 'inline-flex';
+  badge.style.alignItems = 'center';
+  badge.style.justifyContent = 'center';
+  badge.style.borderRadius = '999px';
+  badge.style.background = '#ef4444';
+  badge.style.color = '#fff';
+  badge.style.fontSize = '11px';
+  badge.style.fontWeight = '700';
+  badge.style.border = '2px solid rgba(11, 13, 19, 0.92)';
+  badge.style.animation = 'nivoraPulse 2.8s ease-in-out infinite';
+  avatar.appendChild(badge);
+
+  var frame = document.createElement('iframe');
+  frame.src = baseUrl + '/widget';
+  frame.style.position = 'fixed';
+  frame.style.right = '20px';
+  frame.style.bottom = '92px';
+  frame.style.width = '392px';
+  frame.style.maxWidth = 'calc(100vw - 24px)';
+  frame.style.height = '640px';
+  frame.style.maxHeight = 'calc(100vh - 120px)';
+  frame.style.border = 'none';
+  frame.style.borderRadius = '24px';
+  frame.style.boxShadow = '0 28px 80px rgba(15, 23, 42, .22)';
+  frame.style.overflow = 'hidden';
+  frame.style.background = '#fff';
+  frame.style.zIndex = '999998';
+  frame.style.display = 'none';
+
+  if (window.innerWidth <= 600) {
+    launcher.style.left = 'auto';
+    launcher.style.right = '12px';
+    launcher.style.bottom = '16px';
+    launcher.style.gap = '8px';
+    launcher.style.flexDirection = 'row-reverse';
+    teaser.style.maxWidth = 'min(68vw, 210px)';
+    teaser.style.padding = '12px 14px';
+    teaserText.style.fontSize = '13px';
+    avatar.style.width = '58px';
+    avatar.style.height = '58px';
+    frame.style.right = '12px';
+    frame.style.bottom = '84px';
+    frame.style.width = 'calc(100vw - 24px)';
+    frame.style.height = 'min(680px, calc(100vh - 104px))';
+    frame.style.borderRadius = '22px';
+  }
+
+  function setHoverState(active) {
+    teaser.style.transform = active ? 'translateY(-2px)' : 'translateY(0)';
+    teaser.style.boxShadow = active ? '0 24px 56px rgba(15,23,42,0.28)' : '0 18px 42px rgba(15,23,42,0.22)';
+    teaser.style.borderColor = active ? 'rgba(214,194,154,0.16)' : 'rgba(255,255,255,0.08)';
+    avatar.style.transform = active ? 'translateY(-2px)' : 'translateY(0)';
+    avatar.style.filter = active ? 'brightness(1.03)' : 'brightness(1)';
+    avatar.style.boxShadow = active ? '0 24px 52px rgba(15,23,42,.26)' : '0 18px 40px rgba(15,23,42,.2)';
+  }
+
+  function toggleChat() {
+    var isOpen = frame.style.display === 'block';
+    frame.style.display = isOpen ? 'none' : 'block';
+    launcher.style.display = isOpen ? 'flex' : 'none';
+  }
+
+  teaser.addEventListener('mouseenter', function () { setHoverState(true); });
+  avatar.addEventListener('mouseenter', function () { setHoverState(true); });
+  teaser.addEventListener('mouseleave', function () { setHoverState(false); });
+  avatar.addEventListener('mouseleave', function () { setHoverState(false); });
+  teaser.addEventListener('click', toggleChat);
+  avatar.addEventListener('click', toggleChat);
+
+  launcher.appendChild(teaser);
+  launcher.appendChild(avatar);
+
+  document.body.appendChild(frame);
+  document.body.appendChild(launcher);
+
+  window.setTimeout(function () {
+    launcher.style.opacity = '1';
+    launcher.style.transform = 'translateY(0)';
+  }, 1500);
+
+  window.addEventListener('message', function (event) {
+    if (event.data === 'closeChat') {
+      frame.style.display = 'none';
+      launcher.style.display = 'flex';
+    }
+  });
+})();
+"""
+
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.getenv("PORT", "8080"))
+    app.run(host="0.0.0.0", port=port, debug=True)
