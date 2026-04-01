@@ -92,6 +92,14 @@ SECONDARY_BUDGET_PCT = 0.30
 EXPLORATORY_BUDGET_PCT = 0.18
 FAST_FEEDBACK_BUDGET_PCT = 0.26
 LONG_DATED_HIGH_CONVICTION_BUDGET_PCT = 0.18
+CORE_RELATIVE_PROMOTION_SCORE = 0.78
+CORE_RELATIVE_FLOOR = 0.60
+SECONDARY_RELATIVE_FLOOR = 0.34
+EXPLORATORY_RELATIVE_FLOOR = 0.16
+TARGET_CORE_OPEN_SHARE = 0.18
+TARGET_EXPLORATORY_OPEN_SHARE = 0.22
+MIN_CORE_PER_CYCLE_IF_AVAILABLE = 2
+MIN_EXPLORATORY_PER_CYCLE_IF_AVAILABLE = 2
 
 SOURCE_WEIGHTS = {
     "market_native": 1.00,
@@ -154,6 +162,12 @@ BETS_SCHEMA = {
     "strategy_version": "TEXT DEFAULT 'legacy'",
     "lab_epoch": "TEXT DEFAULT 'legacy'",
     "active_lab": "BOOLEAN DEFAULT TRUE",
+    "obvious_trade_override": "BOOLEAN DEFAULT FALSE",
+    "obvious_trade_reasons": "TEXT",
+    "relative_rank_score": "REAL DEFAULT 0",
+    "quality_rank_pct": "REAL DEFAULT 0",
+    "conviction_rank_pct": "REAL DEFAULT 0",
+    "learnability_rank_pct": "REAL DEFAULT 0",
     "source_quality_score": "REAL DEFAULT 0",
     "source_diversity_score": "REAL DEFAULT 0",
     "factual_strength": "REAL DEFAULT 0",
@@ -497,6 +511,8 @@ def build_cycle_summary(analyzed_count, shortlist_count, selected, watchlist, re
         "secondary_selected": secondary_count,
         "exploratory_selected": exploratory_count,
         "obvious_selected": obvious_count,
+        "watchlist_core_like": sum(1 for item in watchlist if item.get("trade_class") == "core"),
+        "watchlist_exploratory_like": sum(1 for item in watchlist if item.get("trade_class") == "experimental"),
         "blockers": top_blockers,
     }
 
@@ -1177,11 +1193,11 @@ def compute_capital_efficiency_score(candidate):
 
 
 def classify_trade_class(reliability, opportunity_score, learning_velocity_score, ease_of_win_score):
-    if reliability >= 0.64 and opportunity_score >= 0.56 and ease_of_win_score >= 0.58:
+    if reliability >= 0.58 and opportunity_score >= 0.52 and ease_of_win_score >= 0.56:
         return "core"
-    if reliability >= 0.34 and opportunity_score >= 0.36:
+    if reliability >= 0.31 and opportunity_score >= 0.33:
         return "secondary"
-    if learning_velocity_score >= 0.26 or opportunity_score >= 0.28:
+    if learning_velocity_score >= 0.20 or opportunity_score >= 0.24 or ease_of_win_score >= 0.34:
         return "experimental"
     return "skip"
 
@@ -1233,6 +1249,93 @@ def detect_obvious_trade_setup(candidate):
         reasons.append("strong_forecast_gap")
     override = len(reasons) >= 1 and candidate.get("mispricing_score", 0.0) >= 0.48
     return override, reasons[:3]
+
+
+def apply_relative_ranks(candidates):
+    if not candidates:
+        return candidates
+    total = len(candidates)
+
+    def assign_percentile(items, key_name, source_key):
+        ordered = sorted(items, key=lambda item: item.get(source_key, 0.0), reverse=True)
+        for index, item in enumerate(ordered):
+            pct = 1.0 if total == 1 else 1.0 - (index / (total - 1))
+            item[key_name] = round(clamp(pct, 0.0, 1.0), 4)
+
+    assign_percentile(candidates, "quality_rank_pct", "portfolio_priority_score")
+    assign_percentile(candidates, "conviction_rank_pct", "conclusion_reliability_score")
+    assign_percentile(candidates, "learnability_rank_pct", "market_learnability_score")
+
+    for candidate in candidates:
+        relative_score = clamp(
+            candidate.get("quality_rank_pct", 0.0) * 0.42
+            + candidate.get("conviction_rank_pct", 0.0) * 0.30
+            + candidate.get("learnability_rank_pct", 0.0) * 0.16
+            + candidate.get("ease_of_win_score", 0.0) * 0.12,
+            0.0,
+            1.0,
+        )
+        candidate["relative_rank_score"] = round(relative_score, 4)
+        if candidate.get("obvious_trade_override") and relative_score >= 0.66 and candidate.get("conclusion_reliability_score", 0.0) >= 0.40:
+            candidate["trade_class"] = "core"
+            candidate["tier"] = "TIER_A"
+        elif relative_score >= 0.82 and candidate.get("conclusion_reliability_score", 0.0) >= 0.46:
+            candidate["trade_class"] = "core"
+            candidate["tier"] = "TIER_A"
+        elif relative_score >= 0.45 and candidate.get("trade_class") == "experimental" and candidate.get("conclusion_reliability_score", 0.0) >= 0.28:
+            candidate["trade_class"] = "secondary"
+            candidate["tier"] = "TIER_B"
+        elif relative_score <= 0.20 and candidate.get("trade_class") == "secondary" and candidate.get("market_learnability_score", 0.0) >= 0.42:
+            candidate["trade_class"] = "experimental"
+            candidate["tier"] = "TIER_C"
+    return candidates
+
+
+def rebalance_trade_mix(candidates, snapshot):
+    if not candidates:
+        return candidates
+
+    ranked = sorted(candidates, key=lambda item: (
+        item.get("relative_rank_score", 0.0),
+        item.get("portfolio_priority_score", 0.0),
+        item.get("ease_of_win_score", 0.0),
+    ), reverse=True)
+    total = len(ranked)
+    open_total = max(1, len(snapshot.get("open_bets", [])))
+    need_core = snapshot.get("core_open", 0) / open_total < TARGET_CORE_OPEN_SHARE
+    need_exploratory = snapshot.get("experimental_open", 0) / open_total < TARGET_EXPLORATORY_OPEN_SHARE
+    top_core_window = max(MIN_CORE_PER_CYCLE_IF_AVAILABLE, min(4, total // 3 if total >= 6 else total))
+
+    for index, candidate in enumerate(ranked):
+        relative = candidate.get("relative_rank_score", 0.0)
+        reliability = candidate.get("conclusion_reliability_score", 0.0)
+        ease = candidate.get("ease_of_win_score", 0.0)
+        learnability = candidate.get("market_learnability_score", 0.0)
+        learning_velocity = candidate.get("learning_velocity_score", 0.0)
+        obvious = candidate.get("obvious_trade_override", False)
+
+        if index < top_core_window and relative >= CORE_RELATIVE_FLOOR and reliability >= 0.40 and ease >= 0.46:
+            candidate["trade_class"] = "core" if (relative >= CORE_RELATIVE_PROMOTION_SCORE or obvious or need_core) else candidate.get("trade_class", "secondary")
+            if candidate["trade_class"] == "core":
+                candidate["tier"] = "TIER_A" if relative >= 0.84 or obvious else "TIER_B"
+                continue
+
+        if candidate.get("trade_class") == "secondary":
+            if relative < SECONDARY_RELATIVE_FLOOR and learnability >= 0.46:
+                candidate["trade_class"] = "experimental"
+                candidate["tier"] = "TIER_C"
+            elif need_exploratory and learnability >= 0.54 and learning_velocity >= 0.42 and reliability <= 0.45:
+                candidate["trade_class"] = "experimental"
+                candidate["tier"] = "TIER_C"
+        elif candidate.get("trade_class") == "experimental":
+            if relative >= 0.48 and reliability >= 0.30 and ease >= 0.40:
+                candidate["trade_class"] = "secondary"
+                candidate["tier"] = "TIER_B"
+            elif relative < EXPLORATORY_RELATIVE_FLOOR and not obvious:
+                candidate["trade_class"] = "skip"
+                candidate["tier"] = "TIER_D"
+
+    return ranked
 
 
 def build_research_packet(market, market_prob, all_markets, all_bets):
@@ -1617,7 +1720,7 @@ def compute_candidate_score(candidate, open_bets):
     if candidate["obvious_trade_override"]:
         candidate["portfolio_priority_score"] = round(clamp(candidate["portfolio_priority_score"] + 0.10, 0.0, 1.0), 4)
         candidate["opportunity_score"] = round(clamp(candidate["opportunity_score"] + 0.06, 0.0, 1.0), 4)
-        candidate["trade_class"] = "core" if candidate["ease_of_win_score"] >= 0.68 else "secondary" if candidate["conclusion_reliability_score"] >= 0.32 else "experimental"
+        candidate["trade_class"] = "core" if candidate["ease_of_win_score"] >= 0.63 and candidate["conclusion_reliability_score"] >= 0.38 else "secondary" if candidate["conclusion_reliability_score"] >= 0.26 else "experimental"
         candidate["tier"] = "TIER_A" if candidate["ease_of_win_score"] >= 0.72 else "TIER_B"
     return candidate
 
@@ -1698,11 +1801,11 @@ def can_allocate(candidate, snapshot):
         return False, "max_open_positions"
     if snapshot["committed"] / total_equity >= MAX_TOTAL_EXPOSURE_PCT:
         return False, "max_total_exposure"
-    if snapshot["category_exposure"].get(candidate["packet"]["category"], 0.0) / total_equity >= MAX_CATEGORY_EXPOSURE_PCT:
+    if snapshot["category_exposure"].get(candidate["packet"]["category"], 0.0) / total_equity >= MAX_CATEGORY_EXPOSURE_PCT and not candidate.get("obvious_trade_override"):
         return False, "max_category_exposure"
     if snapshot["side_exposure"].get(candidate["side"], 0.0) / total_equity >= MAX_SIDE_EXPOSURE_PCT:
         return False, "max_side_exposure"
-    if snapshot["thesis_exposure"].get(candidate["thesis_type"], 0.0) / total_equity >= MAX_THESIS_EXPOSURE_PCT:
+    if snapshot["thesis_exposure"].get(candidate["thesis_type"], 0.0) / total_equity >= MAX_THESIS_EXPOSURE_PCT and not candidate.get("obvious_trade_override"):
         return False, "max_thesis_exposure"
     if horizon_bucket == "long" and snapshot["horizon_exposure"].get("long", 0.0) / total_equity >= LONG_DATED_HIGH_CONVICTION_BUDGET_PCT and candidate.get("tier") != "TIER_A" and not candidate.get("obvious_trade_override"):
         return False, "long_dated_budget_full"
@@ -1732,11 +1835,14 @@ def size_bet(candidate, snapshot):
         long_dated_multiplier = 0.88 if horizon_bucket == "long" else max(long_dated_multiplier, 1.0)
     tier_multiplier = {"TIER_A": 1.20, "TIER_B": 0.92, "TIER_C": 0.68}.get(tier, 0.48)
     horizon_multiplier = {"ultra_short": 0.95, "short": 1.05, "medium": 1.00, "long": 0.82}.get(horizon_bucket, 0.94)
-    if trade_class == "secondary":
-        base_fraction = min(base_fraction * 0.62, 0.075)
+    relative_multiplier = clamp(0.78 + candidate.get("relative_rank_score", 0.0) * 0.42, 0.72, 1.32)
+    if trade_class == "core":
+        base_fraction = min(base_fraction * (1.08 + candidate.get("relative_rank_score", 0.0) * 0.18), CORE_MAX_FRACTION)
+    elif trade_class == "secondary":
+        base_fraction = min(base_fraction * 0.52, 0.065)
     elif trade_class == "experimental":
-        base_fraction = min(base_fraction * 0.38, EXPERIMENTAL_MAX_FRACTION)
-    final_fraction = clamp(base_fraction * aggression_multiplier * quality_multiplier * liquidity_multiplier * spread_multiplier * memory_multiplier * correlation_multiplier * long_dated_multiplier * learning_multiplier * ease_multiplier * capital_efficiency_multiplier * tier_multiplier * horizon_multiplier, 0.003, CORE_MAX_FRACTION if trade_class == "core" else 0.09 if trade_class == "secondary" else EXPERIMENTAL_MAX_FRACTION)
+        base_fraction = min(base_fraction * 0.28, EXPERIMENTAL_MAX_FRACTION)
+    final_fraction = clamp(base_fraction * aggression_multiplier * quality_multiplier * liquidity_multiplier * spread_multiplier * memory_multiplier * correlation_multiplier * long_dated_multiplier * learning_multiplier * ease_multiplier * capital_efficiency_multiplier * tier_multiplier * horizon_multiplier * relative_multiplier, 0.003, CORE_MAX_FRACTION if trade_class == "core" else 0.09 if trade_class == "secondary" else EXPERIMENTAL_MAX_FRACTION)
     usable_cash = snapshot["free_balance"]
     if trade_class == "core":
         usable_cash = max(0.0, snapshot["free_balance"] - max(0.0, snapshot["exploration_capital_reserved"] - snapshot["experimental_open"] * 20))
@@ -1748,8 +1854,8 @@ def size_bet(candidate, snapshot):
         usable_cash = min(snapshot["free_balance"], usable_cash + snapshot["fast_feedback_budget"] * 0.28)
     if horizon_bucket == "long" and trade_class != "core" and not candidate.get("obvious_trade_override"):
         usable_cash *= 0.82
-    amount = round(max(10.0 if trade_class == "experimental" else 18.0 if trade_class == "secondary" else 24.0, usable_cash * final_fraction), 2)
-    amount = min(amount, snapshot["free_balance"] * (0.20 if trade_class == "core" else 0.12 if trade_class == "secondary" else 0.07))
+    amount = round(max(12.0 if trade_class == "experimental" else 20.0 if trade_class == "secondary" else 34.0, usable_cash * final_fraction), 2)
+    amount = min(amount, snapshot["free_balance"] * (0.22 if trade_class == "core" else 0.11 if trade_class == "secondary" else 0.05))
     return amount, round(final_fraction, 4)
 
 
@@ -1760,6 +1866,10 @@ def select_portfolio(candidates, snapshot):
     cycle_core = 0
     cycle_secondary = 0
     cycle_exploratory = 0
+    cycle_category_counts = Counter()
+    cycle_thesis_counts = Counter()
+    desired_core = min(MAX_CORE_POSITIONS_PER_CYCLE, max(MIN_CORE_PER_CYCLE_IF_AVAILABLE, round(MAX_POSITIONS_PER_CYCLE * 0.22)))
+    desired_exploratory = min(MAX_EXPLORATORY_POSITIONS_PER_CYCLE, max(MIN_EXPLORATORY_PER_CYCLE_IF_AVAILABLE, round(MAX_POSITIONS_PER_CYCLE * 0.25)))
     for candidate in sorted(candidates, key=lambda item: (item.get("portfolio_priority_score", 0.0), item["compound_score"]), reverse=True):
         trade_class = candidate["trade_class"]
         tier = candidate.get("tier", "TIER_C")
@@ -1782,6 +1892,22 @@ def select_portfolio(candidates, snapshot):
             candidate["selection_bucket"] = "watchlist_high_potential"
             watchlist.append(candidate)
             continue
+        same_category_count = cycle_category_counts[candidate["packet"]["category"]]
+        same_thesis_count = cycle_thesis_counts[candidate["thesis_type"]]
+        if same_category_count >= 3 and same_thesis_count >= 2 and not obvious_override:
+            candidate["selection_bucket"] = "watchlist_high_potential"
+            watchlist.append(candidate)
+            continue
+        if trade_class == "secondary" and cycle_core < desired_core and candidate.get("relative_rank_score", 0.0) >= 0.72 and candidate.get("conclusion_reliability_score", 0.0) >= 0.42:
+            trade_class = candidate["trade_class"] = "core"
+            candidate["tier"] = "TIER_A" if candidate.get("relative_rank_score", 0.0) >= 0.82 or obvious_override else "TIER_B"
+            tier = candidate["tier"]
+            floor = TIER_A_SCORE_FLOOR if tier == "TIER_A" else TIER_B_SCORE_FLOOR
+        elif trade_class == "secondary" and cycle_exploratory < desired_exploratory and candidate.get("market_learnability_score", 0.0) >= 0.58 and candidate.get("conclusion_reliability_score", 0.0) <= 0.40:
+            trade_class = candidate["trade_class"] = "experimental"
+            candidate["tier"] = "TIER_C"
+            tier = "TIER_C"
+            floor = EXPERIMENTAL_SCORE_FLOOR
         if candidate["portfolio_priority_score"] < floor and not candidate.get("obvious_enough_to_take") and not obvious_override:
             if len(watchlist) < WATCHLIST_LIMIT:
                 candidate["selection_bucket"] = "watchlist_high_potential"
@@ -1789,7 +1915,7 @@ def select_portfolio(candidates, snapshot):
             else:
                 rejected.append((candidate, "low_score"))
             continue
-        min_reliability = 0.50 if trade_class == "core" else 0.32 if trade_class == "secondary" else 0.20
+        min_reliability = 0.46 if trade_class == "core" else 0.30 if trade_class == "secondary" else 0.18
         if candidate.get("conclusion_reliability_score", 0.0) < min_reliability and not candidate.get("obvious_enough_to_take") and not obvious_override:
             if len(watchlist) < WATCHLIST_LIMIT:
                 candidate["selection_bucket"] = "watchlist_high_potential"
@@ -1797,13 +1923,13 @@ def select_portfolio(candidates, snapshot):
             else:
                 rejected.append((candidate, "low_reliability"))
             continue
-        min_edge = 0.035 if trade_class == "core" else 0.03 if trade_class == "secondary" else 0.025
-        min_conf = 4 if trade_class == "core" else 3
+        min_edge = 0.034 if trade_class == "core" else 0.028 if trade_class == "secondary" else 0.02
+        min_conf = 4 if trade_class == "core" else 3 if trade_class == "secondary" else 2
         if (candidate["edge"] < min_edge or candidate["analysis"]["confidence"] < min_conf) and not obvious_override:
             rejected.append((candidate, "weak_edge_or_confidence"))
             continue
-        min_source = 0.22 if trade_class != "experimental" else 0.16
-        min_evidence = 0.22 if trade_class != "experimental" else 0.16
+        min_source = 0.22 if trade_class == "core" else 0.18 if trade_class == "secondary" else 0.12
+        min_evidence = 0.22 if trade_class == "core" else 0.18 if trade_class == "secondary" else 0.12
         if (candidate["analysis"]["source_quality_score"] < min_source or candidate["analysis"]["evidence_strength"] < min_evidence) and not obvious_override:
             rejected.append((candidate, "low_evidence"))
             continue
@@ -1839,6 +1965,8 @@ def select_portfolio(candidates, snapshot):
         candidate["kelly_f"] = kelly_f
         candidate["selection_bucket"] = "selected_now"
         selected.append(candidate)
+        cycle_category_counts[candidate["packet"]["category"]] += 1
+        cycle_thesis_counts[candidate["thesis_type"]] += 1
         mark_candidate_seen(candidate)
         snapshot["free_balance"] = round(snapshot["free_balance"] - amount, 2)
         snapshot["committed"] += amount
@@ -1894,6 +2022,12 @@ def place_bet_from_candidate(candidate, cycle_id):
         "strategy_version": get_current_strategy_version(),
         "lab_epoch": get_current_lab_epoch(),
         "active_lab": True,
+        "obvious_trade_override": candidate.get("obvious_trade_override", False),
+        "obvious_trade_reasons": json.dumps(candidate.get("obvious_trade_reasons", []), ensure_ascii=False),
+        "relative_rank_score": candidate.get("relative_rank_score", 0.0),
+        "quality_rank_pct": candidate.get("quality_rank_pct", 0.0),
+        "conviction_rank_pct": candidate.get("conviction_rank_pct", 0.0),
+        "learnability_rank_pct": candidate.get("learnability_rank_pct", 0.0),
         "source_quality_score": analysis["source_quality_score"],
         "source_diversity_score": packet["source_diversity_score"],
         "factual_strength": packet["factual_strength"],
@@ -2029,8 +2163,10 @@ def run_bot_cycle():
             logger.exception("Candidate build failed for market=%s", market.get("id", "?"))
 
     shortlist = fast_prefilter(candidates)
-    analyzed = [compute_candidate_score(analyze_candidate(candidate, all_bets), open_bets) for candidate in shortlist]
     snapshot = current_portfolio_snapshot(all_bets)
+    analyzed = [compute_candidate_score(analyze_candidate(candidate, all_bets), open_bets) for candidate in shortlist]
+    analyzed = apply_relative_ranks(analyzed)
+    analyzed = rebalance_trade_mix(analyzed, snapshot)
     selected, watchlist, rejected = select_portfolio(analyzed, snapshot)
     placed = []
     for candidate in selected:
@@ -2068,10 +2204,15 @@ def run_bot_cycle():
             "ease_of_win_score": candidate["ease_of_win_score"],
             "portfolio_priority_score": candidate["portfolio_priority_score"],
             "conclusion_reliability_score": candidate["conclusion_reliability_score"],
+            "relative_rank_score": candidate.get("relative_rank_score", 0.0),
+            "quality_rank_pct": candidate.get("quality_rank_pct", 0.0),
+            "conviction_rank_pct": candidate.get("conviction_rank_pct", 0.0),
+            "learnability_rank_pct": candidate.get("learnability_rank_pct", 0.0),
             "trade_class": candidate["trade_class"],
             "tier": candidate["tier"],
             "horizon_bucket": candidate["horizon_bucket"],
             "obvious_enough_to_take": candidate["obvious_enough_to_take"],
+            "obvious_trade_override": candidate.get("obvious_trade_override", False),
             "category": candidate["packet"]["category"],
             "thesis_type": candidate["thesis_type"],
             "analysis": candidate["analysis"],
@@ -2093,6 +2234,7 @@ def run_bot_cycle():
             "opportunity_score": candidate["opportunity_score"],
             "portfolio_priority_score": candidate["portfolio_priority_score"],
             "reliability": candidate["conclusion_reliability_score"],
+            "relative_rank_score": candidate.get("relative_rank_score", 0.0),
             "reason": candidate["analysis"]["short_reason"],
         }
         for candidate in selected
@@ -2108,6 +2250,9 @@ def run_bot_cycle():
             "portfolio_priority_score": candidate.get("portfolio_priority_score"),
             "opportunity_score": candidate.get("opportunity_score"),
             "reliability": candidate.get("conclusion_reliability_score"),
+            "relative_rank_score": candidate.get("relative_rank_score", 0.0),
+            "learnability": candidate.get("market_learnability_score", 0.0),
+            "ease_of_win": candidate.get("ease_of_win_score", 0.0),
             "reason": candidate["analysis"].get("short_reason"),
             "selection_bucket": candidate.get("selection_bucket", "watchlist_high_potential"),
         }
@@ -2124,6 +2269,7 @@ def run_bot_cycle():
             "edge": round(candidate.get("edge", 0.0), 4),
             "score": candidate.get("portfolio_priority_score", candidate.get("compound_score")),
             "reliability": candidate.get("conclusion_reliability_score"),
+            "relative_rank_score": candidate.get("relative_rank_score", 0.0),
         }
         for candidate, reason in rejected[:40]
     ]
@@ -2155,6 +2301,10 @@ def aggregate_metrics():
     by_thesis = defaultdict(float)
     by_trade_class = defaultdict(float)
     by_tier = defaultdict(float)
+    open_count_by_bucket = defaultdict(int)
+    open_amount_by_bucket = defaultdict(float)
+    open_quality_by_bucket = defaultdict(list)
+    open_reliability_by_bucket = defaultdict(list)
     confidence_stats = defaultdict(lambda: {"won": 0, "total": 0})
     edge_stats = defaultdict(lambda: {"won": 0, "total": 0})
     source_quality_stats = defaultdict(lambda: {"won": 0, "total": 0})
@@ -2167,6 +2317,16 @@ def aggregate_metrics():
     early_feedback_count = 0
     capital_reused_early = 0.0
     hold_hours = []
+    obvious_stats = defaultdict(lambda: {"won": 0, "total": 0, "pnl": 0.0})
+
+    for bet in open_bets:
+        bucket = bet.get("trade_class", "core")
+        amount = safe_float(bet.get("amount"), 0.0)
+        open_count_by_bucket[bucket] += 1
+        open_amount_by_bucket[bucket] += amount
+        open_quality_by_bucket[bucket].append(safe_float(bet.get("portfolio_priority_score"), 0.0))
+        open_reliability_by_bucket[bucket].append(safe_float(bet.get("conclusion_reliability_score"), 0.0))
+
     for bet in realized:
         pnl = safe_float(bet.get("pnl"), 0.0)
         by_category[bet.get("category", "general")] += pnl
@@ -2179,6 +2339,7 @@ def aggregate_metrics():
         evidence_bucket = "high" if safe_float(bet.get("evidence_strength"), 0.0) >= 0.7 else "mid" if safe_float(bet.get("evidence_strength"), 0.0) >= 0.45 else "low"
         contradiction_bucket = "high" if int(bet.get("contradictions_found") or 0) >= 3 else "mid" if int(bet.get("contradictions_found") or 0) >= 1 else "low"
         trade_class_bucket = bet.get("trade_class", "core")
+        obvious_bucket = "obvious" if bet.get("obvious_trade_override") else "non_obvious"
         learning_bucket = "high" if safe_float(bet.get("learning_velocity_score"), 0.0) >= 0.7 else "mid" if safe_float(bet.get("learning_velocity_score"), 0.0) >= 0.45 else "low"
         time_bucket = bet.get("feedback_time_bucket") or bucket_time_to_feedback(safe_float(bet.get("time_to_resolution_hours"), 9999))
         mispricing_type = bet.get("mispricing_type", "unknown")
@@ -2192,6 +2353,8 @@ def aggregate_metrics():
         time_bucket_stats[time_bucket]["total"] += 1
         mispricing_stats[mispricing_type]["total"] += 1
         mispricing_stats[mispricing_type]["pnl"] += pnl
+        obvious_stats[obvious_bucket]["total"] += 1
+        obvious_stats[obvious_bucket]["pnl"] += pnl
         if bet.get("status") == "won":
             confidence_stats[confidence_bucket]["won"] += 1
             edge_stats[edge_bucket_name]["won"] += 1
@@ -2202,6 +2365,7 @@ def aggregate_metrics():
             learning_velocity_stats[learning_bucket]["won"] += 1
             time_bucket_stats[time_bucket]["won"] += 1
             mispricing_stats[mispricing_type]["won"] += 1
+            obvious_stats[obvious_bucket]["won"] += 1
         created = bet.get("created_at")
         resolved_at = bet.get("resolved_at")
         if created and resolved_at:
@@ -2222,6 +2386,11 @@ def aggregate_metrics():
         "portfolio_exposure_by_side": {k: round(v, 2) for k, v in snapshot["side_exposure"].items()},
         "portfolio_exposure_by_tier": {k: round(v, 2) for k, v in snapshot["tier_exposure"].items()},
         "portfolio_exposure_by_horizon": {k: round(v, 2) for k, v in snapshot["horizon_exposure"].items()},
+        "open_count_by_bucket": dict(open_count_by_bucket),
+        "open_amount_by_bucket": {k: round(v, 2) for k, v in open_amount_by_bucket.items()},
+        "average_size_by_bucket": {k: round(open_amount_by_bucket[k] / max(1, open_count_by_bucket[k]), 2) for k in open_count_by_bucket},
+        "average_priority_by_bucket": {k: round(mean(values) * 100, 1) for k, values in open_quality_by_bucket.items()},
+        "average_reliability_by_bucket": {k: round(mean(values) * 100, 1) for k, values in open_reliability_by_bucket.items()},
         "open": len(open_bets),
         "open_current_lab": len(open_bets),
         "legacy_trades_archived": len(legacy_bets),
@@ -2243,6 +2412,7 @@ def aggregate_metrics():
         "winrate_by_learning_velocity": {k: f"{round(v['won'] / v['total'] * 100)}% ({v['total']})" if v['total'] else "—" for k, v in learning_velocity_stats.items()},
         "winrate_by_time_to_resolution_bucket": {k: f"{round(v['won'] / v['total'] * 100)}% ({v['total']})" if v['total'] else "—" for k, v in time_bucket_stats.items()},
         "performance_by_mispricing_type": {k: {"winrate": f"{round(v['won'] / v['total'] * 100)}% ({v['total']})" if v['total'] else "—", "pnl": round(v['pnl'], 2)} for k, v in mispricing_stats.items()},
+        "performance_by_obviousness": {k: {"winrate": f"{round(v['won'] / v['total'] * 100)}% ({v['total']})" if v['total'] else "—", "pnl": round(v['pnl'], 2)} for k, v in obvious_stats.items()},
         "average_hold_time_hours": round(mean(hold_hours), 2),
         "average_time_to_feedback_hours": round(mean(hold_hours), 2),
         "early_feedback_pct": round((early_feedback_count / max(1, len(realized))) * 100, 1),
@@ -2360,6 +2530,11 @@ def bets_endpoint():
             "trade_class": bet.get("trade_class", "core"),
             "tier": bet.get("tier", "TIER_C"),
             "selection_bucket": bet.get("selection_bucket", "selected_now"),
+            "obvious_trade_override": bool(bet.get("obvious_trade_override")),
+            "relative_rank_score": round(safe_float(bet.get("relative_rank_score"), 0.0) * 100, 1),
+            "quality_rank_pct": round(safe_float(bet.get("quality_rank_pct"), 0.0) * 100, 1),
+            "conviction_rank_pct": round(safe_float(bet.get("conviction_rank_pct"), 0.0) * 100, 1),
+            "learnability_rank_pct": round(safe_float(bet.get("learnability_rank_pct"), 0.0) * 100, 1),
             "strategy_version": bet.get("strategy_version", "legacy"),
             "lab_epoch": bet.get("lab_epoch", "legacy"),
             "key_signal": bet.get("key_signal", ""),
@@ -2464,6 +2639,10 @@ def analysis_debug():
             "edge": item.get("edge"),
             "compound_score": item.get("compound_score"),
             "portfolio_priority_score": item.get("portfolio_priority_score"),
+            "relative_rank_score": item.get("relative_rank_score"),
+            "quality_rank_pct": item.get("quality_rank_pct"),
+            "conviction_rank_pct": item.get("conviction_rank_pct"),
+            "learnability_rank_pct": item.get("learnability_rank_pct"),
             "tier": item.get("tier"),
             "horizon_bucket": item.get("horizon_bucket"),
             "conclusion_reliability_score": item.get("conclusion_reliability_score"),
@@ -2705,15 +2884,16 @@ function money(value){return '$'+Math.round(value||0).toLocaleString('en-US')}
 function pct(value){return Math.round((value||0)*100)+'%'}
 function metricClass(value){return value>0?'positive':value<0?'negative':'neutral'}
 function titleCase(value){return (value||'—').replaceAll('_',' ')}
+function bucketLabel(value){return value==='experimental'?'exploratory':titleCase(value)}
 function objectLines(obj, empty='—'){const entries=Object.entries(obj||{});if(!entries.length)return empty;return entries.map(([k,v])=>`${titleCase(k)}: ${typeof v==='object'?JSON.stringify(v):v}`).join('<br>')}
 async function postJson(url,payload){const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});return res.json()}
 
 function setValue(id,text,raw){const el=document.getElementById(id);el.textContent=text;if(raw!==undefined){el.className=(el.className.includes('hero-value')?'hero-value ':'stat-value ')+metricClass(raw)}}
 
-function renderTradeCard(b){return `<div class='trade-card'><div class='trade-top'><div><div class='trade-q'>${b.question}</div><div class='badge-row'><span class='badge ${b.trade_class}'>${b.trade_class}</span><span class='badge'>${b.tier}</span><span class='badge'>${b.horizon_bucket||'—'}</span><span class='badge'>${b.category}</span></div></div><div class='badge'>${b.status_text}</div></div><div class='trade-grid'><div class='meta-box'><span>Posición</span><strong>${b.side} · ${money(b.amount)}</strong></div><div class='meta-box'><span>PnL</span><strong class='${metricClass(b.pnl||0)}'>${b.pnl_text}</strong></div><div class='meta-box'><span>Entry / Current</span><strong>${b.price_entry||0} / ${b.price_current||0}</strong></div><div class='meta-box'><span>Edge / Confidence</span><strong>${b.edge}pp · ${b.confidence}/10</strong></div><div class='meta-box'><span>Reliability / Ease</span><strong>${b.reliability}% · ${b.ease_of_win}%</strong></div><div class='meta-box'><span>Priority / Bucket</span><strong>${b.portfolio_priority_score}% · ${titleCase(b.selection_bucket)}</strong></div></div><div class='trade-foot'><strong>Señal clave:</strong> ${b.key_signal||'—'}<br><strong>Invalidación:</strong> ${b.invalidation_condition||'—'}<br><strong>Racional:</strong> ${b.reasoning||'—'}</div></div>`}
-function renderWatchCard(item){return `<div class='watch-card'><div class='watch-top'><div><div class='watch-q'>${item.question}</div><div class='badge-row'><span class='badge ${item.trade_class||'watch'}'>${item.trade_class||'watchlist'}</span><span class='badge'>${item.tier||'—'}</span><span class='badge'>${item.horizon_bucket||'—'}</span></div></div></div><div class='trade-grid'><div class='meta-box'><span>Priority</span><strong>${Math.round((item.portfolio_priority_score||0)*100)}%</strong></div><div class='meta-box'><span>Opportunity</span><strong>${Math.round((item.opportunity_score||0)*100)}%</strong></div><div class='meta-box'><span>Reliability</span><strong>${Math.round((item.reliability||0)*100)}%</strong></div><div class='meta-box'><span>Estado</span><strong>${titleCase(item.selection_bucket||'watchlist_high_potential')}</strong></div></div><div class='watch-foot'>${item.reason||'Necesita un poco más de prioridad o espacio en portfolio antes de entrar.'}</div></div>`}
+function renderTradeCard(b){return `<div class='trade-card'><div class='trade-top'><div><div class='trade-q'>${b.question}</div><div class='badge-row'><span class='badge ${b.trade_class}'>${bucketLabel(b.trade_class)}</span><span class='badge'>${b.tier}</span><span class='badge'>${b.horizon_bucket||'—'}</span><span class='badge'>${b.category}</span>${b.obvious_trade_override?"<span class='badge'>obvious</span>":""}</div></div><div class='badge'>${b.status_text}</div></div><div class='trade-grid'><div class='meta-box'><span>Posición</span><strong>${b.side} · ${money(b.amount)}</strong></div><div class='meta-box'><span>PnL</span><strong class='${metricClass(b.pnl||0)}'>${b.pnl_text}</strong></div><div class='meta-box'><span>Entry / Current</span><strong>${b.price_entry||0} / ${b.price_current||0}</strong></div><div class='meta-box'><span>Edge / Confidence</span><strong>${b.edge}pp · ${b.confidence}/10</strong></div><div class='meta-box'><span>Reliability / Ease</span><strong>${b.reliability}% · ${b.ease_of_win}%</strong></div><div class='meta-box'><span>Priority / Rank</span><strong>${b.portfolio_priority_score}% · ${b.relative_rank_score||0}%</strong></div></div><div class='trade-foot'><strong>Señal clave:</strong> ${b.key_signal||'—'}<br><strong>Invalidación:</strong> ${b.invalidation_condition||'—'}<br><strong>Racional:</strong> ${b.reasoning||'—'}</div></div>`}
+function renderWatchCard(item){return `<div class='watch-card'><div class='watch-top'><div><div class='watch-q'>${item.question}</div><div class='badge-row'><span class='badge ${item.trade_class||'watch'}'>${bucketLabel(item.trade_class||'watchlist')}</span><span class='badge'>${item.tier||'—'}</span><span class='badge'>${item.horizon_bucket||'—'}</span>${item.obvious_trade_override?"<span class='badge'>obvious</span>":""}</div></div></div><div class='trade-grid'><div class='meta-box'><span>Priority</span><strong>${Math.round((item.portfolio_priority_score||0)*100)}%</strong></div><div class='meta-box'><span>Opportunity</span><strong>${Math.round((item.opportunity_score||0)*100)}%</strong></div><div class='meta-box'><span>Reliability</span><strong>${Math.round((item.reliability||0)*100)}%</strong></div><div class='meta-box'><span>Learnability / Ease</span><strong>${Math.round((item.learnability||0)*100)}% · ${Math.round((item.ease_of_win||0)*100)}%</strong></div></div><div class='watch-foot'>${item.reason||'Necesita un poco más de prioridad o espacio en portfolio antes de entrar.'}</div></div>`}
 
-async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Strategy: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Bankroll inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Legacy archivado: ${d.legacy_trades_archived||0}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.7?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*22 + (1-Math.abs((d.portfolio_exposure||0)-0.48))*18 + Math.min((d.positions_per_cycle_last||0)/16,1)*24 + Math.min((d.trades_last_hour||0)/8,1)*16 + Math.min((d.coverage_breadth||0)/8,1)*20));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`Capital libre ${money(d.capital_free)} · comprometido ${money(d.capital_committed)} · ${d.open_current_lab||0} trades abiertos · ${d.trades_last_hour||0} trades en la última hora · avg bets/cycle ${d.average_bets_per_cycle||0}.`;document.getElementById('perf-summary').innerHTML=`PnL total <strong>${money(d.total_pnl)}</strong>. Realizado <strong>${money(d.realized_pnl)}</strong>, unrealized <strong>${money(d.unrealized_pnl)}</strong>. Hold medio <strong>${d.average_hold_time_hours||0}h</strong> y feedback temprano en <strong>${d.early_feedback_pct||0}%</strong> de los trades cerrados.`;document.getElementById('mix-summary').innerHTML=`Exposure por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Exposure por horizon:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay posiciones abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Winrate por learning velocity:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Winrate por time bucket:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay buckets suficientes.')}<br><br>Obvious trades último ciclo: <strong>${d.obvious_trades_last_cycle||0}</strong>`;document.getElementById('pattern-summary').innerHTML=`Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}<br>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>PnL por tier:<br>${objectLines(d.pnl_by_tier,'Todavía no hay PnL por tier.')}`;document.getElementById('debug-summary').innerHTML=`Legacy archivados: <strong>${d.legacy_trades_archived||0}</strong><br>Descartados por evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartados por correlación/exposure: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Selected / watchlist / rejected: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong><br>Trades última hora: <strong>${d.trades_last_hour||0}</strong>`}
+async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Strategy: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Bankroll inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Legacy archivado: ${d.legacy_trades_archived||0}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.7?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*22 + (1-Math.abs((d.portfolio_exposure||0)-0.48))*18 + Math.min((d.positions_per_cycle_last||0)/16,1)*24 + Math.min((d.trades_last_hour||0)/8,1)*16 + Math.min((d.coverage_breadth||0)/8,1)*20));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`Capital libre ${money(d.capital_free)} · comprometido ${money(d.capital_committed)} · ${d.open_current_lab||0} trades abiertos · ${d.trades_last_hour||0} trades en la última hora · avg bets/cycle ${d.average_bets_per_cycle||0}.`;document.getElementById('perf-summary').innerHTML=`PnL total <strong>${money(d.total_pnl)}</strong>. Realizado <strong>${money(d.realized_pnl)}</strong>, unrealized <strong>${money(d.unrealized_pnl)}</strong>. Hold medio <strong>${d.average_hold_time_hours||0}h</strong> y feedback temprano en <strong>${d.early_feedback_pct||0}%</strong> de los trades cerrados.`;document.getElementById('mix-summary').innerHTML=`Counts por bucket:<br>${objectLines(d.open_count_by_bucket,'Todavía no hay trades abiertos.')}<br><br>Capital por bucket:<br>${objectLines(d.open_amount_by_bucket,'Todavía no hay capital desplegado.')}<br><br>Average size por bucket:<br>${objectLines(d.average_size_by_bucket,'Todavía no hay tamaños para resumir.')}<br><br>Priority media por bucket:<br>${objectLines(d.average_priority_by_bucket,'Sin quality summary todavía.')}<br><br>Exposure por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Exposure por horizon:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay posiciones abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Winrate por bucket:<br>${objectLines(d.winrate_core_vs_exploratory,'Aún no hay historial suficiente.')}<br><br>Winrate por learning velocity:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Winrate por time bucket:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay buckets suficientes.')}<br><br>Obvious trades último ciclo: <strong>${d.obvious_trades_last_cycle||0}</strong>`;document.getElementById('pattern-summary').innerHTML=`Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}<br>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>PnL por bucket:<br>${objectLines(d.pnl_by_trade_class,'Todavía no hay PnL por bucket.')}<br><br>Performance obvious vs non-obvious:<br>${objectLines(d.performance_by_obviousness,'Todavía no hay suficiente historial.')}`;document.getElementById('debug-summary').innerHTML=`Legacy archivados: <strong>${d.legacy_trades_archived||0}</strong><br>Descartados por evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartados por correlación/exposure: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Selected / watchlist / rejected: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong><br>Trades última hora: <strong>${d.trades_last_hour||0}</strong>`}
 async function loadCycle(){const d=await fetch('/candidate-scores').then(r=>r.json());const s=d.summary||{};document.getElementById('cycle-message').textContent=s.headline||'Todavía no hay resumen del último ciclo.';document.getElementById('cycle-analyzed').textContent=s.analyzed||0;document.getElementById('cycle-shortlist').textContent=s.shortlist||0;document.getElementById('cycle-selected').textContent=s.selected||0;document.getElementById('cycle-watchlist').textContent=s.watchlist||0;document.getElementById('cycle-rejected').textContent=s.rejected||0;document.getElementById('cycle-mix').innerHTML=`<div class='metric-item'><span>Core</span><strong>${s.core_selected||0}</strong></div><div class='metric-item'><span>Secondary</span><strong>${s.secondary_selected||0}</strong></div><div class='metric-item'><span>Exploratory</span><strong>${s.exploratory_selected||0}</strong></div><div class='metric-item'><span>Obvious overrides</span><strong>${s.obvious_selected||0}</strong></div>`;const blockers=Object.entries(d.blockers||{});document.getElementById('blockers').innerHTML=blockers.length?blockers.map(([k,v])=>`<div class='reason-item'><span>${titleCase(k)}</span><strong>${v}</strong></div>`).join(''):"<div class='reason-item'><span>No hubo bloqueos relevantes en el último ciclo.</span><strong>OK</strong></div>";document.getElementById('watchlist').innerHTML=(d.watchlist||[]).length?(d.watchlist||[]).slice(0,8).map(renderWatchCard).join(''):"<div class='empty'>No hay candidatos en watchlist en este ciclo.</div>";document.getElementById('live-tag').textContent=(s.selected||0)>0?'Operando':(s.watchlist||0)>0?'Observando':'En espera';document.getElementById('bot-status').textContent=(s.selected||0)>0?'Bot operando':(s.watchlist||0)>0?'Bot viendo oportunidades':'Bot en espera';document.getElementById('bot-reasoning').textContent=s.headline||'Todavía no hay actividad reciente suficiente.'}
 async function loadBets(){const d=await fetch('/bets').then(r=>r.json());document.getElementById('bets').innerHTML=d.length?d.map(renderTradeCard).join(''):"<div class='empty'>Todavía no hay trades en este laboratorio.</div>"}
 async function runCycle(){document.getElementById('bot-status').textContent='Corriendo ciclo';document.getElementById('bot-reasoning').textContent='Investigando mercados, armando ranking y evaluando entradas.';const d=await fetch('/bot-bet',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.placed?'Bot operando':'Bot en espera';document.getElementById('bot-reasoning').textContent=d.message||d.reasoning||'';await loadAll()}
