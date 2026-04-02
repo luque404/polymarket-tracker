@@ -107,6 +107,16 @@ TARGET_CORE_OPEN_SHARE = 0.18
 TARGET_EXPLORATORY_OPEN_SHARE = 0.22
 MIN_CORE_PER_CYCLE_IF_AVAILABLE = 2
 MIN_EXPLORATORY_PER_CYCLE_IF_AVAILABLE = 2
+ENGINE_SHORTLIST_MIN = {
+    "obvious_mispricing": 6,
+    "relative_value_inconsistency": 6,
+    "near_resolution_clearness": 8,
+}
+ENGINE_POOL_CAP = {
+    "obvious_mispricing": 16,
+    "relative_value_inconsistency": 14,
+    "near_resolution_clearness": 18,
+}
 RUNNER_PROCESS_ID = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 SOURCE_WEIGHTS = {
@@ -163,6 +173,15 @@ BETS_SCHEMA = {
     "category": "TEXT",
     "thesis_type": "TEXT",
     "mispricing_type": "TEXT",
+    "source_engine": "TEXT DEFAULT 'main'",
+    "setup_family": "TEXT DEFAULT 'general'",
+    "setup_type": "TEXT",
+    "simple_thesis": "TEXT",
+    "confidence_proxy": "REAL DEFAULT 0",
+    "engine_opportunity_score": "REAL DEFAULT 0",
+    "setup_quality_score": "REAL DEFAULT 0",
+    "selection_rationale": "TEXT",
+    "related_market_refs": "TEXT",
     "trade_class": "TEXT DEFAULT 'core'",
     "entry_class": "TEXT DEFAULT 'standard'",
     "entry_mode": "TEXT DEFAULT 'collector'",
@@ -1077,6 +1096,8 @@ def build_cycle_summary(analyzed_count, shortlist_count, selected, watchlist, re
             "execution_too_poor": "entrar salía demasiado caro",
             "ambiguous_market": "el mercado era ambiguo",
             "size_too_small": "solo valían una apuesta demasiado chica",
+            "unsupported_setup_family": "no encajaban en los setups principales del bot",
+            "low_setup_quality": "la tesis era demasiado débil o poco clara",
         }.get(top_reason, "todavía no era momento de apostar")
         headline = f"Revisó {analyzed_count} mercados. Encontró {len(watchlist)} oportunidades, pero no hizo apuestas porque {readable_reason}."
     elif shortlist_count:
@@ -1090,6 +1111,8 @@ def build_cycle_summary(analyzed_count, shortlist_count, selected, watchlist, re
             "execution_too_poor": "la ejecución era mala",
             "ambiguous_market": "el mercado no era claro",
             "size_too_small": "solo valían una apuesta demasiado chica",
+            "unsupported_setup_family": "no encajaban en los setups principales del bot",
+            "low_setup_quality": "la tesis era demasiado débil o poco clara",
         }.get(top_reason, "faltó una oportunidad clara")
         headline = f"Revisó {analyzed_count} mercados. {shortlist_count} quedaron preseleccionadas, pero no hizo apuestas porque {readable_reason}."
     else:
@@ -1108,6 +1131,12 @@ def build_cycle_summary(analyzed_count, shortlist_count, selected, watchlist, re
         "watchlist_core_like": sum(1 for item in watchlist if item.get("trade_class") == "core"),
         "watchlist_exploratory_like": sum(1 for item in watchlist if item.get("trade_class") == "experimental"),
         "blockers": top_blockers,
+        "setup_family_selected": dict(Counter(item.get("setup_family", "general") for item in selected)),
+        "setup_family_watchlist": dict(Counter(item.get("setup_family", "general") for item in watchlist)),
+        "setup_family_rejected": dict(Counter(item.get("setup_family", "general") for item, _ in rejected)),
+        "engine_selected": dict(Counter(item.get("setup_family", "general") for item in selected)),
+        "engine_watchlist": dict(Counter(item.get("setup_family", "general") for item in watchlist)),
+        "engine_rejected": dict(Counter(reason for _, reason in rejected)),
     }
 
 
@@ -1595,6 +1624,195 @@ def detect_obvious_opportunity(market_data, packet):
     }
 
 
+def build_engine_candidate(question, market, packet, source_engine, setup_type, simple_thesis, direction, confidence_proxy, raw_edge_estimate, engine_opportunity_score, related_market_refs=None, obvious_opportunity=None):
+    return {
+        "question": question[:120],
+        "market_id": market.get("id", ""),
+        "market": market,
+        "packet": packet,
+        "source_engine": source_engine,
+        "setup_type": setup_type,
+        "simple_thesis": simple_thesis[:220],
+        "side_hint": direction,
+        "confidence_proxy": round(clamp(confidence_proxy, 0.0, 1.0), 4),
+        "raw_edge_estimate": round(clamp(raw_edge_estimate, 0.0, 1.0), 4),
+        "engine_opportunity_score": round(clamp(engine_opportunity_score, 0.0, 1.0), 4),
+        "related_market_refs": related_market_refs or [],
+        "obvious_opportunity": obvious_opportunity or {},
+        "prefilter_score": 0.0,
+    }
+
+
+def normalize_setup_family(source_engine, setup_type, packet):
+    if source_engine == "obvious_mispricing":
+        return "obvious_mispricing"
+    if source_engine == "relative_value":
+        return "relative_value_inconsistency"
+    if source_engine == "fast_feedback":
+        return "near_resolution_clearness"
+    if packet.get("days_left", 999) <= 14 and packet.get("resolution_type") in ("deadline", "binary", "election", "legal", "launch"):
+        return "near_resolution_clearness"
+    return "general"
+
+
+def compute_setup_quality_score(candidate):
+    packet = candidate["packet"]
+    setup_family = candidate.get("setup_family", "general")
+    confidence_proxy = candidate.get("confidence_proxy", 0.0)
+    engine_score = candidate.get("engine_opportunity_score", 0.0)
+    execution = candidate.get("execution_quality_score", 0.0)
+    learnability = candidate.get("market_learnability_score", packet.get("market_learnability_score", 0.0))
+    severity = candidate.get("mispricing_severity", 0.0)
+    uncertainty = packet.get("uncertainty_score", 0.0)
+    if setup_family == "obvious_mispricing":
+        score = confidence_proxy * 0.34 + severity * 0.28 + execution * 0.18 + learnability * 0.10 + packet.get("factual_strength", 0.0) * 0.10 - uncertainty * 0.12
+    elif setup_family == "relative_value_inconsistency":
+        score = engine_score * 0.34 + execution * 0.18 + packet.get("source_quality_score", 0.0) * 0.16 + severity * 0.16 + packet.get("cluster_divergence", 0.0) * 0.20 - uncertainty * 0.10
+    elif setup_family == "near_resolution_clearness":
+        score = learnability * 0.28 + packet.get("learning_velocity_score", 0.0) * 0.24 + confidence_proxy * 0.18 + execution * 0.14 + packet.get("factual_strength", 0.0) * 0.10 + severity * 0.10 - uncertainty * 0.08
+    else:
+        score = engine_score * 0.28 + confidence_proxy * 0.20 + execution * 0.20 + severity * 0.16 + learnability * 0.10 - uncertainty * 0.12
+    return round(clamp(score, 0.0, 1.0), 4)
+
+
+def obvious_mispricing_engine(question, market, packet):
+    obvious = detect_obvious_opportunity(market, packet)
+    if not obvious.get("obvious_signal"):
+        return None
+    thesis = {
+        "extreme_price_error": "Precio extremo con respaldo flojo para ese nivel de certeza.",
+        "near_resolution_clarity": "Mercado cerca de resolución con resultado más limitado de lo que refleja el precio.",
+        "timeline_misunderstanding": "El mercado parece asumir un plazo demasiado optimista.",
+        "cross_market_inconsistency": "Mercados relacionados no están alineados entre sí.",
+        "overconfident_weak_evidence": "El mercado está demasiado seguro con evidencia débil.",
+        "stale_price_after_information": "El precio parece atrasado frente a información ya conocida.",
+        "microstructure_dislocation": "El flujo y el libro sugieren un desajuste claro.",
+    }.get(obvious.get("obvious_type"), "Hay una oportunidad simple y clara.")
+    return build_engine_candidate(
+        question,
+        market,
+        packet,
+        "obvious_mispricing",
+        obvious.get("obvious_type"),
+        thesis,
+        obvious.get("direction"),
+        obvious.get("estimated_confidence", 0.0),
+        obvious.get("simple_edge_estimate", 0.0),
+        obvious.get("estimated_confidence", 0.0) * 0.75 + obvious.get("simple_edge_estimate", 0.0) * 1.2,
+        related_market_refs=[],
+        obvious_opportunity=obvious,
+    )
+
+
+def relative_value_engine(question, market, packet):
+    cluster_gap = safe_float(packet.get("cluster_divergence"), 0.0)
+    external_gap = safe_float(packet.get("external_forecast_divergence"), 0.0)
+    if max(cluster_gap, external_gap) < 0.08:
+        return None
+    direction = "NO" if packet.get("market_prob", 0.5) >= 0.5 else "SI"
+    if packet.get("external_forecast_prob") is not None:
+        direction = "NO" if packet.get("external_forecast_prob", 0.5) < packet.get("market_prob", 0.5) else "SI"
+    setup_type = "cross_market_gap" if cluster_gap >= external_gap else "external_reference_gap"
+    thesis = "Este mercado no está alineado con mercados relacionados o referencias externas cercanas."
+    return build_engine_candidate(
+        question,
+        market,
+        packet,
+        "relative_value",
+        setup_type,
+        thesis,
+        direction,
+        clamp(0.46 + cluster_gap * 1.2 + external_gap * 0.8, 0.0, 1.0),
+        max(cluster_gap * 0.75, external_gap * 0.85),
+        clamp(cluster_gap * 1.5 + external_gap * 1.2 + packet.get("source_quality_score", 0.0) * 0.25, 0.0, 1.0),
+        related_market_refs=[packet.get("related_markets_summary", "")[:180]],
+    )
+
+
+def fast_feedback_engine(question, market, packet):
+    days_left = safe_float(packet.get("days_left"), 999)
+    if days_left > 21:
+        return None
+    clarity = clamp(packet.get("market_learnability_score", 0.0) * 0.45 + packet.get("factual_strength", 0.0) * 0.20 + (0.18 if packet.get("resolution_type") in ("deadline", "binary", "election", "legal", "launch") else 0.0) - packet.get("uncertainty_score", 0.0) * 0.18, 0.0, 1.0)
+    if clarity < 0.32:
+        return None
+    direction = "NO" if packet.get("market_prob", 0.5) >= 0.56 else "SI"
+    thesis = "Mercado de feedback rápido con resolución clara y oportunidad suficiente para aprender pronto."
+    return build_engine_candidate(
+        question,
+        market,
+        packet,
+        "fast_feedback",
+        "near_resolution_feedback",
+        thesis,
+        direction,
+        clamp(clarity + packet.get("learning_velocity_score", 0.0) * 0.25, 0.0, 1.0),
+        max(0.015, abs(packet.get("momentum_24h", 0.0)) * 0.35 + max(0.0, packet.get("market_prob", 0.5) - 0.58) * 0.12),
+        clamp(packet.get("learning_velocity_score", 0.0) * 0.50 + clarity * 0.38 + packet.get("microstructure_quality_score", 0.0) * 0.12, 0.0, 1.0),
+    )
+
+def generate_engine_candidates(question, market, packet):
+    generated = []
+    for builder in (
+        obvious_mispricing_engine,
+        relative_value_engine,
+        fast_feedback_engine,
+    ):
+        candidate = builder(question, market, packet)
+        if candidate:
+            candidate["setup_family"] = normalize_setup_family(candidate.get("source_engine", "main"), candidate.get("setup_type"), packet)
+            candidate["prefilter_score"] = round(clamp(
+                candidate["engine_opportunity_score"] * 0.42
+                + candidate["confidence_proxy"] * 0.22
+                + packet.get("mispricing_score", 0.0) * 0.14
+                + packet.get("learning_velocity_score", 0.0) * 0.10
+                + packet.get("market_learnability_score", 0.0) * 0.06
+                + packet.get("source_quality_score", 0.0) * 0.06
+                - packet.get("uncertainty_score", 0.0) * 0.10,
+                0.0,
+                1.0,
+            ), 4)
+            generated.append(candidate)
+    return generated
+
+
+def build_engine_prefilter_pool(candidates, pool_limit=60):
+    grouped = defaultdict(list)
+    for candidate in candidates:
+        grouped[candidate.get("setup_family", candidate.get("source_engine", "main"))].append(candidate)
+    for engine in grouped:
+        grouped[engine] = sorted(grouped[engine], key=lambda item: item.get("prefilter_score", 0.0), reverse=True)
+
+    selected = []
+    seen_keys = set()
+
+    def add_candidate(item):
+        key = (
+            item.get("market_id"),
+            item.get("source_engine"),
+            item.get("setup_type"),
+        )
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        selected.append(item)
+
+    for engine, minimum in ENGINE_SHORTLIST_MIN.items():
+        for item in grouped.get(engine, [])[:minimum]:
+            add_candidate(item)
+
+    remaining = []
+    for engine, items in grouped.items():
+        cap = ENGINE_POOL_CAP.get(engine, 12)
+        remaining.extend(items[:cap])
+    remaining = sorted(remaining, key=lambda item: item.get("prefilter_score", 0.0), reverse=True)
+    for item in remaining:
+        if len(selected) >= pool_limit:
+            break
+        add_candidate(item)
+    return selected[:pool_limit]
+
+
 def compute_execution_quality_score(packet):
     spread = safe_float(packet.get("spread"), 1.0)
     liquidity = safe_float(packet.get("liquidity_info", {}).get("liquidity_score"), packet.get("microstructure_quality_score", 0.0))
@@ -1642,7 +1860,7 @@ def determine_entry_mode(candidate):
     ease = candidate.get("ease_of_win_score", 0.0)
     priority = candidate.get("portfolio_priority_score", 0.0)
     if severe >= 0.62 and reliability >= 0.42 and ease >= 0.48 and priority >= 0.46:
-        return "sniper"
+        return "strong"
     return "collector"
 
 
@@ -2219,8 +2437,8 @@ def apply_relative_ranks(candidates):
         )
         candidate["relative_rank_score"] = round(relative_score, 4)
         if candidate.get("expected_value", 0.0) > 0.05 and relative_score >= 0.72 and candidate.get("execution_quality_score", 0.0) >= 0.45:
-            candidate["entry_class"] = "sniper"
-            candidate["entry_mode"] = "sniper"
+            candidate["entry_class"] = "strong"
+            candidate["entry_mode"] = "strong"
             candidate["trade_class"] = "core"
             candidate["tier"] = "TIER_A"
         elif candidate.get("obvious_trade_override") and relative_score >= 0.66 and candidate.get("conclusion_reliability_score", 0.0) >= 0.40:
@@ -2264,8 +2482,8 @@ def rebalance_trade_mix(candidates, snapshot):
         if index < top_core_window and relative >= CORE_RELATIVE_FLOOR and reliability >= 0.40 and ease >= 0.46:
             candidate["trade_class"] = "core" if (relative >= CORE_RELATIVE_PROMOTION_SCORE or obvious or need_core or candidate.get("expected_value", 0.0) > 0.05) else candidate.get("trade_class", "secondary")
             if candidate["trade_class"] == "core":
-                candidate["entry_class"] = "sniper"
-                candidate["entry_mode"] = "sniper"
+                candidate["entry_class"] = "strong"
+                candidate["entry_mode"] = "strong"
                 candidate["tier"] = "TIER_A" if relative >= 0.84 or obvious else "TIER_B"
                 continue
 
@@ -2506,17 +2724,24 @@ def get_performance_context():
 def fast_prefilter(candidates):
     if not candidates:
         return []
-    ranked = sorted(candidates, key=lambda item: item["prefilter_score"], reverse=True)
-    heuristic_top = ranked[:60]
+    engine_input_counts = Counter(item.get("setup_family", item.get("source_engine", "main")) for item in candidates)
+    heuristic_top = build_engine_prefilter_pool(candidates, pool_limit=60)
     if not ANTHROPIC_API_KEY:
-        logger.info("Fast prefilter heuristic_only input=%s output=%s", len(candidates), min(len(heuristic_top), 40))
+        logger.info(
+            "Fast prefilter heuristic_only input=%s pooled=%s output=%s engine_input=%s",
+            len(candidates),
+            len(heuristic_top),
+            min(len(heuristic_top), 40),
+            dict(engine_input_counts),
+        )
         return heuristic_top[:40]
     try:
-        prefilter_pool = ranked[:60]
-        market_lines = "\n".join([f"{idx + 1}. {item['question']} | cat={item['packet']['category']} | vol={round(item['packet']['volume'])} | spread={round(item['packet']['spread'] * 100, 2)}% | mispricing={round(item['packet']['mispricing_score'] * 100)} | learn_vel={round(item['packet']['learning_velocity_score'] * 100)} | signal_q={round(item['packet']['source_quality_score'] * 100)}" for idx, item in enumerate(prefilter_pool)])
+        prefilter_pool = heuristic_top[:60]
+        market_lines = "\n".join([f"{idx + 1}. {item['question']} | family={item.get('setup_family')} | engine={item.get('source_engine')} | setup={item.get('setup_type')} | cat={item['packet']['category']} | vol={round(item['packet']['volume'])} | spread={round(item['packet']['spread'] * 100, 2)}% | engine_score={round(item.get('engine_opportunity_score', 0.0) * 100)} | mispricing={round(item['packet']['mispricing_score'] * 100)} | learn_vel={round(item['packet']['learning_velocity_score'] * 100)}" for idx, item in enumerate(prefilter_pool)])
         prompt = f"""Eres un prefilter de ideas para un portfolio de paper trading en Polymarket.
 {get_performance_context()}
 Selecciona hasta 40 ids con mejor potencial de mispricing ajustado por calidad de evidencia, liquidez, learning velocity y diversificación.
+Preserva variedad entre familias: near_resolution_clearness, obvious_mispricing y relative_value_inconsistency.
 Prefiere dejar pasar oportunidades razonables antes que recortar demasiado temprano.
 Descarta mercados con mala evidencia o demasiado ruido.
 Devuelve solo JSON con formato {{"top":[1,2,3]}}.
@@ -2528,11 +2753,11 @@ Mercados:
         indices = [index - 1 for index in parsed.get("top", []) if 1 <= index <= len(prefilter_pool)]
         if indices:
             picked = [prefilter_pool[index] for index in indices[:40]]
-            logger.info("Fast prefilter model input=%s output=%s", len(candidates), len(picked))
+            logger.info("Fast prefilter model input=%s pooled=%s output=%s family_input=%s family_output=%s", len(candidates), len(prefilter_pool), len(picked), dict(engine_input_counts), dict(Counter(item.get("setup_family", item.get("source_engine", "main")) for item in picked)))
             return picked
     except Exception:
         logger.exception("Fast prefilter failed")
-    logger.info("Fast prefilter fallback input=%s output=%s", len(candidates), min(len(heuristic_top), 40))
+    logger.info("Fast prefilter fallback input=%s pooled=%s output=%s family_input=%s family_output=%s", len(candidates), len(heuristic_top), min(len(heuristic_top), 40), dict(engine_input_counts), dict(Counter(item.get("setup_family", item.get("source_engine", "main")) for item in heuristic_top[:40])))
     return heuristic_top[:40]
 
 
@@ -2659,6 +2884,7 @@ Research packet:
 def compute_candidate_score(candidate, open_bets):
     packet = candidate["packet"]
     analysis = candidate["analysis"]
+    source_engine = candidate.get("source_engine", "main")
     correlation_penalty = estimate_correlation_penalty(candidate, open_bets)
     liquidity_score = clamp((packet["volume"] / 25000.0), 0.0, 1.0)
     spread_score = clamp(1 - (packet["spread"] / 0.06), 0.0, 1.0)
@@ -2698,6 +2924,10 @@ def compute_candidate_score(candidate, open_bets):
     candidate["market_quality_score"] = round(clamp(orderbook_quality * 0.35 + spread_score * 0.20 + packet.get("microstructure_quality_score", 0.0) * 0.25 + packet.get("source_quality_score", 0.0) * 0.20, 0.0, 1.0), 4)
     candidate["market_family"] = packet.get("market_family", "general")
     candidate["anomaly_flags"] = packet.get("anomaly_flags", [])
+    candidate["source_engine"] = source_engine
+    candidate["setup_family"] = candidate.get("setup_family", normalize_setup_family(source_engine, candidate.get("setup_type"), packet))
+    candidate["setup_type"] = candidate.get("setup_type", packet.get("thesis_type"))
+    candidate["simple_thesis"] = candidate.get("simple_thesis", analysis.get("short_reason", packet.get("thesis_type", "")))
     candidate["execution_quality_score"] = compute_execution_quality_score(packet)
     candidate["time_to_resolution_factor"] = compute_time_to_resolution_factor(packet)
     side = analysis.get("side")
@@ -2711,6 +2941,12 @@ def compute_candidate_score(candidate, open_bets):
     candidate["model_side_prob"] = model_side_prob
     candidate["market_side_price"] = market_side_price
     candidate["reliability_score"] = reliability_score
+    candidate["setup_quality_score"] = compute_setup_quality_score(candidate)
+    engine_bias = {
+        "obvious_mispricing": 0.06,
+        "relative_value": 0.05,
+        "fast_feedback": 0.04,
+    }.get(source_engine, 0.0)
     candidate["opportunity_score"] = round(clamp(
         candidate["expected_value_score"] * 0.48
         + candidate["mispricing_severity"] * 0.24
@@ -2720,15 +2956,17 @@ def compute_candidate_score(candidate, open_bets):
         0.0,
         1.0,
     ), 4)
+    candidate["opportunity_score"] = round(clamp(candidate["opportunity_score"] + engine_bias + candidate.get("engine_opportunity_score", 0.0) * 0.10, 0.0, 1.0), 4)
     candidate["capital_efficiency_score"] = compute_capital_efficiency_score(candidate)
     score = (
         candidate["expected_value_score"] * 2.1
         + candidate["mispricing_severity"] * 1.4
         + candidate["execution_quality_score"] * 1.0
-        + reliability_score * 0.95
+        + reliability_score * 0.60
+        + candidate["setup_quality_score"] * 1.25
         + candidate["time_to_resolution_factor"] * 0.55
         + candidate["capital_efficiency_score"] * 0.45
-        + historical_bias * 0.45
+        + historical_bias * 0.25
         - correlation_penalty * 0.85
     )
     candidate["compound_score"] = round(clamp(score / 5.5, 0.0, 1.0), 4)
@@ -2736,10 +2974,11 @@ def compute_candidate_score(candidate, open_bets):
         candidate["expected_value_score"] * 0.34
         + candidate["mispricing_severity"] * 0.22
         + candidate["execution_quality_score"] * 0.14
-        + reliability_score * 0.12
+        + reliability_score * 0.06
+        + candidate["setup_quality_score"] * 0.16
         + candidate["time_to_resolution_factor"] * 0.08
         + candidate["capital_efficiency_score"] * 0.05
-        + candidate["historical_pattern_score"] * 0.05
+        + candidate["historical_pattern_score"] * 0.03
         - correlation_penalty * 0.08
         - spread_penalty * 0.05,
         0.0,
@@ -2748,12 +2987,16 @@ def compute_candidate_score(candidate, open_bets):
     candidate["correlation_penalty"] = round(correlation_penalty, 4)
     candidate["conclusion_reliability_score"] = round(reliability, 4)
     candidate["entry_validation_score"] = compute_entry_validation_score(candidate)
-    if obvious.get("obvious_signal") and obvious.get("estimated_confidence", 0.0) >= 0.80 and candidate["execution_quality_score"] >= 0.18:
-        entry_class = "sniper"
-    elif obvious.get("obvious_signal") and obvious.get("estimated_confidence", 0.0) >= 0.58 and candidate["execution_quality_score"] >= 0.10:
+    if source_engine == "obvious_mispricing" and obvious.get("estimated_confidence", 0.0) >= 0.78 and candidate["execution_quality_score"] >= 0.16:
+        entry_class = "strong"
+    elif source_engine == "obvious_mispricing" and obvious.get("estimated_confidence", 0.0) >= 0.54 and candidate["execution_quality_score"] >= 0.08:
+        entry_class = "standard"
+    elif source_engine == "fast_feedback" and expected_value > 0.001 and candidate["execution_quality_score"] >= 0.08:
+        entry_class = "standard" if candidate["time_to_resolution_factor"] >= 0.84 else "exploratory"
+    elif source_engine == "relative_value" and expected_value > 0.002 and candidate["execution_quality_score"] >= 0.12:
         entry_class = "standard"
     elif expected_value > 0.035 and candidate["execution_quality_score"] >= 0.46 and candidate["mispricing_severity"] >= 0.50:
-        entry_class = "sniper"
+        entry_class = "strong"
     elif expected_value > 0.004:
         entry_class = "standard"
     elif expected_value > 0.0005:
@@ -2761,8 +3004,8 @@ def compute_candidate_score(candidate, open_bets):
     else:
         entry_class = "skip"
     candidate["entry_class"] = entry_class
-    candidate["entry_mode"] = "sniper" if entry_class == "sniper" else "collector"
-    candidate["trade_class"] = "core" if entry_class == "sniper" else "secondary" if entry_class == "standard" else "experimental" if entry_class == "exploratory" else "skip"
+    candidate["entry_mode"] = "strong" if entry_class == "strong" else "collector"
+    candidate["trade_class"] = "core" if entry_class == "strong" else "secondary" if entry_class == "standard" else "experimental" if entry_class == "exploratory" else "skip"
     candidate["tier"] = assign_candidate_tier(candidate)
     candidate["obvious_enough_to_take"] = obvious_enough_to_take(candidate)
     candidate["obvious_trade_override"], candidate["obvious_trade_reasons"] = detect_obvious_trade_setup(candidate)
@@ -2770,26 +3013,25 @@ def compute_candidate_score(candidate, open_bets):
         candidate["portfolio_priority_score"] = round(clamp(candidate["portfolio_priority_score"] + 0.10, 0.0, 1.0), 4)
         candidate["opportunity_score"] = round(clamp(candidate["opportunity_score"] + 0.06, 0.0, 1.0), 4)
         candidate["mispricing_severity"] = round(clamp(candidate["mispricing_severity"] + 0.08, 0.0, 1.0), 4)
-        candidate["entry_class"] = "sniper" if candidate["mispricing_severity"] >= 0.62 else "standard"
-        candidate["entry_mode"] = "sniper" if candidate["entry_class"] == "sniper" else "collector"
-        candidate["trade_class"] = "core" if candidate["entry_class"] == "sniper" else "secondary"
+        candidate["entry_class"] = "strong" if candidate["mispricing_severity"] >= 0.62 else "standard"
+        candidate["entry_mode"] = "strong" if candidate["entry_class"] == "strong" else "collector"
+        candidate["trade_class"] = "core" if candidate["entry_class"] == "strong" else "secondary"
         candidate["tier"] = "TIER_A" if candidate["ease_of_win_score"] >= 0.72 else "TIER_B"
+    candidate["selection_rationale"] = candidate.get("simple_thesis") or analysis.get("short_reason") or candidate.get("setup_type", "")
     logger.info(
-        "Candidate evaluation market_id=%s family=%s mispricing_type=%s entry_class=%s mode=%s side=%s raw_edge=%.4f ev=%.4f ev_score=%.4f exec_quality=%.4f severity=%.4f reliability=%.4f priority=%.4f anomalies=%s",
+        "Candidate evaluation market_id=%s setup_family=%s engine=%s setup=%s entry_class=%s side=%s raw_edge=%.4f ev=%.4f exec_quality=%.4f setup_quality=%.4f severity=%.4f priority=%.4f",
         candidate.get("market_id"),
-        candidate.get("market_family", "general"),
-        candidate.get("mispricing_type"),
+        candidate.get("setup_family", "general"),
+        candidate.get("source_engine", "main"),
+        candidate.get("setup_type"),
         candidate.get("entry_class"),
-        candidate.get("entry_mode", "collector"),
         candidate.get("side"),
         candidate.get("raw_edge_estimate", 0.0),
         candidate.get("expected_value", 0.0),
-        candidate.get("expected_value_score", 0.0),
         candidate.get("execution_quality_score", 0.0),
+        candidate.get("setup_quality_score", 0.0),
         candidate.get("mispricing_severity", 0.0),
-        candidate.get("reliability_score", 0.0),
         candidate.get("portfolio_priority_score", 0.0),
-        candidate.get("anomaly_flags", []),
     )
     return candidate
 
@@ -2887,6 +3129,7 @@ def size_bet(candidate, snapshot):
     reliability = candidate.get("reliability_score", candidate.get("conclusion_reliability_score", 0.0))
     trade_class = candidate["trade_class"]
     entry_class = candidate.get("entry_class", "standard")
+    source_engine = candidate.get("source_engine", "main")
     tier = candidate.get("tier", "TIER_C")
     horizon_bucket = candidate.get("horizon_bucket", "medium")
     side_price = max(0.02, candidate.get("market_side_price", compute_current_side_price(candidate.get("side", "SI"), packet.get("market_prob", 0.5))))
@@ -2895,7 +3138,12 @@ def size_bet(candidate, snapshot):
     kelly_core = clamp((model_prob - side_price) / max(1 - side_price, 0.05), 0.0, 1.0)
     base_fraction = clamp(kelly_core * 0.25, 0.003, CORE_MAX_FRACTION)
     aggression_multiplier = {"high": 1.35, "medium": 1.0, "low": 0.70}.get(analysis["recommended_aggression"], 1.0)
-    entry_class_multiplier = {"sniper": 1.18, "standard": 0.78, "exploratory": 0.42}.get(entry_class, 0.0)
+    entry_class_multiplier = {"strong": 1.12, "standard": 0.72, "exploratory": 0.36}.get(entry_class, 0.0)
+    engine_multiplier = {
+        "obvious_mispricing": 1.04,
+        "relative_value": 0.96,
+        "fast_feedback": 0.92,
+    }.get(source_engine, 1.0)
     quality_multiplier = 0.72 + candidate.get("execution_quality_score", 0.0) * 0.28 + reliability * 0.18
     liquidity_multiplier = clamp(0.55 + min(packet["volume"], 50000) / 50000.0, 0.55, 1.35)
     spread_multiplier = clamp(1.08 - packet["spread"] * 9, 0.35, 1.02)
@@ -2910,7 +3158,7 @@ def size_bet(candidate, snapshot):
     tier_multiplier = {"TIER_A": 1.20, "TIER_B": 0.92, "TIER_C": 0.68}.get(tier, 0.48)
     horizon_multiplier = {"ultra_short": 0.95, "short": 1.05, "medium": 1.00, "long": 0.82}.get(horizon_bucket, 0.94)
     relative_multiplier = clamp(0.78 + candidate.get("relative_rank_score", 0.0) * 0.42, 0.72, 1.32)
-    if entry_class == "sniper":
+    if entry_class == "strong":
         base_fraction = min(base_fraction * (1.10 + candidate.get("mispricing_severity", 0.0) * 0.12), CORE_MAX_FRACTION)
     elif entry_class == "standard":
         base_fraction = min(base_fraction * 0.70, 0.07)
@@ -2920,6 +3168,7 @@ def size_bet(candidate, snapshot):
         base_fraction
         * aggression_multiplier
         * entry_class_multiplier
+        * engine_multiplier
         * quality_multiplier
         * liquidity_multiplier
         * spread_multiplier
@@ -2946,7 +3195,7 @@ def size_bet(candidate, snapshot):
         usable_cash = min(snapshot["free_balance"], usable_cash + snapshot["fast_feedback_budget"] * 0.28)
     if horizon_bucket == "long" and trade_class != "core" and not candidate.get("obvious_trade_override"):
         usable_cash *= 0.82
-    amount = round(max(8.0 if trade_class == "experimental" else 18.0 if trade_class == "secondary" else 34.0, usable_cash * final_fraction), 2)
+    amount = round(max(7.0 if trade_class == "experimental" else 18.0 if trade_class == "secondary" else 34.0, usable_cash * final_fraction), 2)
     amount = min(amount, snapshot["free_balance"] * (0.22 if trade_class == "core" else 0.11 if trade_class == "secondary" else 0.05))
     return amount, round(kelly_core * 0.25, 4)
 
@@ -2970,6 +3219,8 @@ def select_portfolio(candidates, snapshot):
         obvious_override = candidate.get("obvious_trade_override", False)
         obvious = candidate.get("obvious_opportunity", {})
         obvious_signal = obvious.get("obvious_signal", False)
+        source_engine = candidate.get("source_engine", "main")
+        setup_family = candidate.get("setup_family", "general")
         is_dup, dup_reason = is_duplicate_or_near_duplicate(candidate, snapshot["open_bets"], selected)
         if is_dup:
             if obvious_signal:
@@ -2999,12 +3250,18 @@ def select_portfolio(candidates, snapshot):
         if candidate["packet"].get("resolution_type") == "ambiguous" and not obvious_override:
             rejected.append((candidate, "ambiguous_market"))
             continue
+        if setup_family not in ("near_resolution_clearness", "obvious_mispricing", "relative_value_inconsistency") and not obvious_override:
+            rejected.append((candidate, "unsupported_setup_family"))
+            continue
+        if candidate.get("setup_quality_score", 0.0) < 0.26 and not obvious_override:
+            rejected.append((candidate, "low_setup_quality"))
+            continue
         if (
             candidate["analysis"].get("take_now_vs_watchlist") == "watchlist"
             and len(watchlist) < WATCHLIST_LIMIT
             and not obvious_override
-            and ev < 0.002
-            and validation < 0.22
+            and ev < (0.0005 if source_engine == "fast_feedback" else 0.002)
+            and validation < (0.18 if source_engine == "fast_feedback" else 0.22)
         ):
             candidate["selection_bucket"] = "watchlist_high_potential"
             watchlist.append(candidate)
@@ -3018,8 +3275,8 @@ def select_portfolio(candidates, snapshot):
         if trade_class == "secondary" and cycle_core < desired_core and candidate.get("relative_rank_score", 0.0) >= 0.72 and candidate.get("reliability_score", 0.0) >= 0.40:
             trade_class = candidate["trade_class"] = "core"
             candidate["tier"] = "TIER_A" if candidate.get("relative_rank_score", 0.0) >= 0.82 or obvious_override else "TIER_B"
-            entry_class = candidate["entry_class"] = "sniper"
-            entry_mode = candidate["entry_mode"] = "sniper"
+            entry_class = candidate["entry_class"] = "strong"
+            entry_mode = candidate["entry_mode"] = "strong"
             tier = candidate["tier"]
         elif trade_class == "secondary" and cycle_exploratory < desired_exploratory and candidate.get("market_learnability_score", 0.0) >= 0.50 and candidate.get("reliability_score", 0.0) <= 0.42:
             trade_class = candidate["trade_class"] = "experimental"
@@ -3027,10 +3284,12 @@ def select_portfolio(candidates, snapshot):
             entry_mode = candidate["entry_mode"] = "collector"
             candidate["tier"] = "TIER_C"
             tier = "TIER_C"
+        if source_engine == "fast_feedback" and ev > 0.0005 and execution_quality >= 0.08:
+            trade_class = candidate["trade_class"] = "secondary" if entry_class != "exploratory" else "experimental"
         if obvious_signal and obvious.get("estimated_confidence", 0.0) >= 0.58:
             trade_class = candidate["trade_class"] = "secondary" if obvious.get("estimated_confidence", 0.0) < 0.80 else "core"
-            entry_class = candidate["entry_class"] = "standard" if obvious.get("estimated_confidence", 0.0) < 0.80 else "sniper"
-            entry_mode = candidate["entry_mode"] = "collector" if entry_class == "standard" else "sniper"
+            entry_class = candidate["entry_class"] = "standard" if obvious.get("estimated_confidence", 0.0) < 0.80 else "strong"
+            entry_mode = candidate["entry_mode"] = "collector" if entry_class == "standard" else "strong"
             tier = candidate["tier"] = "TIER_B" if trade_class == "secondary" else "TIER_A"
         if len(selected) >= MAX_POSITIONS_PER_CYCLE + 6 and not obvious_override:
             rejected.append((candidate, "cycle_limit"))
@@ -3064,17 +3323,16 @@ def select_portfolio(candidates, snapshot):
         candidate["kelly_f"] = kelly_f
         candidate["selection_bucket"] = "selected_now"
         logger.info(
-            "Entry validated market_id=%s entry_class=%s class=%s mode=%s ev=%.4f severity=%.4f execution=%.4f validation=%.4f amount=%.2f kelly=%.4f",
+            "Entry validated market_id=%s setup_family=%s engine=%s entry_class=%s class=%s ev=%.4f setup_quality=%.4f execution=%.4f amount=%.2f",
             candidate.get("market_id"),
+            setup_family,
+            source_engine,
             entry_class,
             trade_class,
-            entry_mode,
             ev,
-            severity,
+            candidate.get("setup_quality_score", 0.0),
             execution_quality,
-            validation,
             amount,
-            kelly_f,
         )
         if obvious_signal:
             logger.info(
@@ -3136,6 +3394,15 @@ def place_bet_from_candidate(candidate, cycle_id):
         "category": packet["category"],
         "thesis_type": analysis["thesis_type"],
         "mispricing_type": candidate.get("mispricing_type", analysis["mispricing_type"]),
+        "source_engine": candidate.get("source_engine", "main"),
+        "setup_family": candidate.get("setup_family", "general"),
+        "setup_type": candidate.get("setup_type"),
+        "simple_thesis": candidate.get("simple_thesis"),
+        "confidence_proxy": candidate.get("confidence_proxy", 0.0),
+        "engine_opportunity_score": candidate.get("engine_opportunity_score", 0.0),
+        "setup_quality_score": candidate.get("setup_quality_score", 0.0),
+        "selection_rationale": candidate.get("selection_rationale", candidate.get("simple_thesis")),
+        "related_market_refs": json.dumps(candidate.get("related_market_refs", []), ensure_ascii=False),
         "trade_class": candidate["trade_class"],
         "entry_class": candidate.get("entry_class", "standard"),
         "entry_mode": candidate.get("entry_mode", "collector"),
@@ -3285,6 +3552,7 @@ def run_bot_cycle(cycle_id=None):
     candidates = []
     seen_by_category = Counter()
     accepted_by_category = Counter()
+    engine_generated_counts = Counter()
     support_rejections = Counter()
     skipped_open_duplicates = 0
     for market in markets:
@@ -3300,28 +3568,19 @@ def run_bot_cycle(cycle_id=None):
                 skipped_open_duplicates += 1
                 continue
             packet = build_research_packet(market, market_prob, markets, all_bets, reddit_cache=reddit_cache)
-            obvious_opportunity = detect_obvious_opportunity(market, packet)
             accepted_by_category[packet.get("category", "general")] += 1
-            prefilter_score = clamp(
-                packet["source_quality_score"] * 0.18
-                + packet["final_evidence_strength"] * 0.14
-                + packet["mispricing_score"] * 0.24
-                + packet["learning_velocity_score"] * 0.14
-                + packet["market_learnability_score"] * 0.08
-                + (packet["volume"] / 50000.0) * 0.10
-                + (obvious_opportunity.get("estimated_confidence", 0.0) * 0.24 if obvious_opportunity.get("obvious_signal") else 0.0)
-                - packet["uncertainty_score"] * 0.14,
-                0.0,
-                1.0,
-            )
-            candidates.append({"question": question, "market_id": market.get("id", ""), "market": market, "packet": packet, "prefilter_score": round(prefilter_score, 4), "obvious_opportunity": obvious_opportunity})
+            engine_candidates = generate_engine_candidates(question, market, packet)
+            if engine_candidates:
+                candidates.extend(engine_candidates)
+                engine_generated_counts.update(item.get("setup_family", item.get("source_engine", "main")) for item in engine_candidates)
         except Exception:
             logger.exception("Candidate build failed for market=%s", market.get("id", "?"))
 
     logger.info(
-        "Market scan stages fetched=%s passed_support=%s skipped_open_duplicates=%s support_rejections=%s categories_seen=%s categories_passed_support=%s",
+        "Market scan stages fetched=%s passed_support=%s engine_generated=%s skipped_open_duplicates=%s support_rejections=%s categories_seen=%s categories_passed_support=%s",
         len(markets),
-        len(candidates),
+        sum(accepted_by_category.values()),
+        dict(engine_generated_counts),
         skipped_open_duplicates,
         dict(support_rejections),
         dict(seen_by_category),
@@ -3330,10 +3589,11 @@ def run_bot_cycle(cycle_id=None):
 
     shortlist = fast_prefilter(candidates)
     logger.info(
-        "Market scan shortlist stage candidates=%s shortlist=%s anthropic_enabled=%s",
+        "Market scan shortlist stage candidates=%s shortlist=%s anthropic_enabled=%s shortlist_by_family=%s",
         len(candidates),
         len(shortlist),
         bool(ANTHROPIC_API_KEY),
+        dict(Counter(candidate.get("setup_family", candidate.get("source_engine", "main")) for candidate in shortlist)),
     )
     snapshot = current_portfolio_snapshot(all_bets)
     analyzed = [compute_candidate_score(analyze_candidate(candidate, all_bets), open_bets) for candidate in shortlist]
@@ -3347,11 +3607,12 @@ def run_bot_cycle(cycle_id=None):
     )
     selected, watchlist, rejected = select_portfolio(analyzed, snapshot)
     logger.info(
-        "Market scan selection stage analyzed=%s selected=%s watchlist=%s rejected=%s",
+        "Market scan selection stage analyzed=%s selected=%s watchlist=%s rejected=%s selected_by_family=%s",
         len(analyzed),
         len(selected),
         len(watchlist),
         len(rejected),
+        dict(Counter(candidate.get("setup_family", candidate.get("source_engine", "main")) for candidate in selected)),
     )
     placed = []
     for candidate in selected:
@@ -3366,6 +3627,13 @@ def run_bot_cycle(cycle_id=None):
             "prefilter_score": candidate["prefilter_score"],
             "category": candidate["packet"]["category"],
             "obvious_opportunity": candidate.get("obvious_opportunity", {}),
+            "source_engine": candidate.get("source_engine"),
+            "setup_family": candidate.get("setup_family"),
+            "setup_type": candidate.get("setup_type"),
+            "simple_thesis": candidate.get("simple_thesis"),
+            "confidence_proxy": candidate.get("confidence_proxy", 0.0),
+            "engine_opportunity_score": candidate.get("engine_opportunity_score", 0.0),
+            "setup_quality_score": candidate.get("setup_quality_score", 0.0),
             "source_quality_score": candidate["packet"]["source_quality_score"],
             "evidence_strength": candidate["packet"]["final_evidence_strength"],
             "contradictions_found": candidate["packet"]["contradictions_found"],
@@ -3396,6 +3664,12 @@ def run_bot_cycle(cycle_id=None):
             "learnability_rank_pct": candidate.get("learnability_rank_pct", 0.0),
             "trade_class": candidate["trade_class"],
             "entry_class": candidate.get("entry_class"),
+            "source_engine": candidate.get("source_engine"),
+            "setup_family": candidate.get("setup_family"),
+            "setup_type": candidate.get("setup_type"),
+            "simple_thesis": candidate.get("simple_thesis"),
+            "setup_quality_score": candidate.get("setup_quality_score", 0.0),
+            "confidence_proxy": candidate.get("confidence_proxy", 0.0),
             "tier": candidate["tier"],
             "horizon_bucket": candidate["horizon_bucket"],
             "obvious_enough_to_take": candidate["obvious_enough_to_take"],
@@ -3413,6 +3687,10 @@ def run_bot_cycle(cycle_id=None):
             "question": candidate["question"],
             "trade_class": candidate["trade_class"],
             "entry_class": candidate.get("entry_class"),
+            "source_engine": candidate.get("source_engine"),
+            "setup_family": candidate.get("setup_family"),
+            "setup_type": candidate.get("setup_type"),
+            "simple_thesis": candidate.get("simple_thesis"),
             "tier": candidate.get("tier"),
             "horizon_bucket": candidate.get("horizon_bucket"),
             "obvious_trade_override": candidate.get("obvious_trade_override", False),
@@ -3422,12 +3700,14 @@ def run_bot_cycle(cycle_id=None):
             "edge": round(candidate["edge"], 4),
             "expected_value": candidate.get("expected_value", 0.0),
             "execution_quality_score": candidate.get("execution_quality_score", 0.0),
+            "setup_quality_score": candidate.get("setup_quality_score", 0.0),
             "compound_score": candidate["compound_score"],
             "opportunity_score": candidate["opportunity_score"],
             "portfolio_priority_score": candidate["portfolio_priority_score"],
             "reliability": candidate["conclusion_reliability_score"],
             "relative_rank_score": candidate.get("relative_rank_score", 0.0),
             "reason": candidate["analysis"]["short_reason"],
+            "selection_rationale": candidate.get("selection_rationale", candidate.get("simple_thesis")),
         }
         for candidate in selected
     ]
@@ -3436,6 +3716,10 @@ def run_bot_cycle(cycle_id=None):
             "question": candidate["question"],
             "trade_class": candidate["trade_class"],
             "entry_class": candidate.get("entry_class"),
+            "source_engine": candidate.get("source_engine"),
+            "setup_family": candidate.get("setup_family"),
+            "setup_type": candidate.get("setup_type"),
+            "simple_thesis": candidate.get("simple_thesis"),
             "tier": candidate.get("tier"),
             "horizon_bucket": candidate.get("horizon_bucket"),
             "obvious_trade_override": candidate.get("obvious_trade_override", False),
@@ -3443,6 +3727,7 @@ def run_bot_cycle(cycle_id=None):
             "edge": round(candidate.get("edge", 0.0), 4),
             "expected_value": candidate.get("expected_value", 0.0),
             "execution_quality_score": candidate.get("execution_quality_score", 0.0),
+            "setup_quality_score": candidate.get("setup_quality_score", 0.0),
             "portfolio_priority_score": candidate.get("portfolio_priority_score"),
             "opportunity_score": candidate.get("opportunity_score"),
             "reliability": candidate.get("conclusion_reliability_score"),
@@ -3460,6 +3745,10 @@ def run_bot_cycle(cycle_id=None):
             "reason": reason,
             "trade_class": candidate.get("trade_class"),
             "entry_class": candidate.get("entry_class"),
+            "source_engine": candidate.get("source_engine"),
+            "setup_family": candidate.get("setup_family"),
+            "setup_type": candidate.get("setup_type"),
+            "simple_thesis": candidate.get("simple_thesis"),
             "tier": candidate.get("tier"),
             "horizon_bucket": candidate.get("horizon_bucket"),
             "obvious_trade_override": candidate.get("obvious_trade_override", False),
@@ -3468,6 +3757,7 @@ def run_bot_cycle(cycle_id=None):
             "expected_value": candidate.get("expected_value", 0.0),
             "expected_value_score": candidate.get("expected_value_score", 0.0),
             "execution_quality_score": candidate.get("execution_quality_score", 0.0),
+            "setup_quality_score": candidate.get("setup_quality_score", 0.0),
             "reliability_score": candidate.get("reliability_score", candidate.get("conclusion_reliability_score")),
             "mispricing_type": candidate.get("mispricing_type"),
             "score": candidate.get("portfolio_priority_score", candidate.get("compound_score")),
@@ -3479,6 +3769,13 @@ def run_bot_cycle(cycle_id=None):
     ]
     LAST_CYCLE_DATA["summary"] = build_cycle_summary(len(candidates), len(shortlist), selected, watchlist, rejected)
     LAST_CYCLE_DATA["blockers"] = LAST_CYCLE_DATA["summary"].get("blockers", {})
+    LAST_CYCLE_DATA["engine_summary"] = {
+        "generated": dict(Counter(candidate.get("setup_family", candidate.get("source_engine", "main")) for candidate in candidates)),
+        "shortlist": dict(Counter(candidate.get("setup_family", candidate.get("source_engine", "main")) for candidate in shortlist)),
+        "selected": dict(Counter(candidate.get("setup_family", candidate.get("source_engine", "main")) for candidate in selected)),
+        "watchlist": dict(Counter(candidate.get("setup_family", candidate.get("source_engine", "main")) for candidate in watchlist)),
+        "rejected": dict(Counter(candidate.get("setup_family", candidate.get("source_engine", "main")) for candidate, _ in rejected)),
+    }
     persist_last_cycle_dashboard(LAST_CYCLE_DATA)
     set_state("cycles_run", get_state("cycles_run", 0) + 1)
     set_state("markets_analyzed_last_cycle", len(candidates))
