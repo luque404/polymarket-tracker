@@ -51,6 +51,10 @@ BET_LOOP_INTERVAL_SECONDS = int(os.environ.get("BET_LOOP_INTERVAL_SECONDS", "180
 MONITOR_LOOP_INTERVAL_SECONDS = 3600
 INITIAL_RESOLUTION_CHECK_SECONDS = 3600
 RESOLUTION_RETRY_SECONDS = 7200
+RUNNER_HEARTBEAT_SECONDS = int(os.environ.get("RUNNER_HEARTBEAT_SECONDS", str(max(15, min(60, BET_LOOP_INTERVAL_SECONDS // 3 or 15)))))
+RUNNER_LEASE_SECONDS = int(os.environ.get("RUNNER_LEASE_SECONDS", str(max(180, BET_LOOP_INTERVAL_SECONDS * 3))))
+RUNNER_STALE_AFTER_SECONDS = int(os.environ.get("RUNNER_STALE_AFTER_SECONDS", str(max(600, BET_LOOP_INTERVAL_SECONDS * 4))))
+RUNNER_CYCLE_LOCK_TIMEOUT_SECONDS = int(os.environ.get("RUNNER_CYCLE_LOCK_TIMEOUT_SECONDS", str(max(300, BET_LOOP_INTERVAL_SECONDS * 4))))
 MARKETS_FETCH_LIMIT = 500
 MARKETS_PREVIEW_LIMIT = 20
 MAX_OPEN_BETS = 140
@@ -100,6 +104,7 @@ TARGET_CORE_OPEN_SHARE = 0.18
 TARGET_EXPLORATORY_OPEN_SHARE = 0.22
 MIN_CORE_PER_CYCLE_IF_AVAILABLE = 2
 MIN_EXPLORATORY_PER_CYCLE_IF_AVAILABLE = 2
+RUNNER_PROCESS_ID = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 SOURCE_WEIGHTS = {
     "market_native": 1.00,
@@ -236,6 +241,40 @@ STATE_DEFAULTS = {
     "paper_starting_balance": str(DEFAULT_BALANCE),
     "lab_resets": "0",
     "recent_candidate_cache": "{}",
+    "runner_enabled": "true" if ENABLE_BACKGROUND_LOOPS else "false",
+    "runner_last_heartbeat": "",
+    "runner_health_state": "stopped",
+    "runner_leader_id": "",
+    "last_cycle_started_at": "",
+    "last_cycle_finished_at": "",
+    "last_cycle_status": "never",
+    "last_cycle_duration_ms": "0",
+    "last_cycle_error": "",
+    "last_cycle_analyzed": "0",
+    "last_cycle_shortlist": "0",
+    "last_cycle_selected": "0",
+    "last_cycle_watchlist": "0",
+    "last_cycle_rejected": "0",
+    "last_successful_cycle_at": "",
+    "runner_cycle_lock_owner": "",
+    "runner_cycle_lock_until": "",
+}
+
+RUNNER_CYCLES_SCHEMA = {
+    "id": "TEXT PRIMARY KEY",
+    "trigger": "TEXT",
+    "started_at": "TIMESTAMPTZ DEFAULT NOW()",
+    "finished_at": "TIMESTAMPTZ",
+    "status": "TEXT DEFAULT 'started'",
+    "duration_ms": "INTEGER DEFAULT 0",
+    "analyzed": "INTEGER DEFAULT 0",
+    "shortlist": "INTEGER DEFAULT 0",
+    "selected": "INTEGER DEFAULT 0",
+    "watchlist": "INTEGER DEFAULT 0",
+    "rejected": "INTEGER DEFAULT 0",
+    "obvious_selected": "INTEGER DEFAULT 0",
+    "error_text": "TEXT",
+    "summary_json": "TEXT",
 }
 
 BACKGROUND_LOOPS_LOCK = threading.Lock()
@@ -275,6 +314,7 @@ def init_db():
         with get_db() as conn:
             with conn.cursor() as cur:
                 ensure_table_columns(cur, "bets", BETS_SCHEMA)
+                ensure_table_columns(cur, "runner_cycles", RUNNER_CYCLES_SCHEMA)
                 cur.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
                 for key, value in STATE_DEFAULTS.items():
                     cur.execute("INSERT INTO state (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING", (key, value))
@@ -331,6 +371,401 @@ def set_state(key, value):
     except psycopg2.Error:
         logger.exception("Failed to set state key=%s", key)
         return False
+
+
+def set_state_values(mapping):
+    if not DATABASE_URL or not mapping:
+        return False
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                for key, value in mapping.items():
+                    cur.execute(
+                        "INSERT INTO state (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+                        (key, "" if value is None else str(value)),
+                    )
+        return True
+    except psycopg2.Error:
+        logger.exception("Failed to set state values")
+        return False
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def to_iso(value):
+    if not value:
+        return ""
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    return str(value)
+
+
+def format_age_seconds(seconds):
+    seconds = int(max(0, seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, rem = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m" if rem < 30 else f"{minutes}m {rem}s"
+    hours, mins = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {mins}m"
+    days, hrs = divmod(hours, 24)
+    return f"{days}d {hrs}h"
+
+
+def is_runner_enabled():
+    return get_state_text("runner_enabled", "false").lower() == "true"
+
+
+def set_runner_enabled(enabled):
+    set_state("runner_enabled", "true" if enabled else "false")
+    if not enabled:
+        set_state_values({
+            "runner_health_state": "stopped",
+            "runner_leader_id": "",
+            "runner_last_heartbeat": "",
+        })
+
+
+def claim_runner_leader(force=False):
+    if not DATABASE_URL:
+        return False
+    now = utc_now()
+    now_iso = to_iso(now)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT key, value FROM state WHERE key IN ('runner_leader_id','runner_last_heartbeat') FOR UPDATE")
+                rows = {key: value for key, value in cur.fetchall()}
+                leader_id = rows.get("runner_leader_id", "")
+                heartbeat = iso_to_datetime(rows.get("runner_last_heartbeat", ""))
+                lease_expired = not heartbeat or (now - heartbeat).total_seconds() > RUNNER_LEASE_SECONDS
+                if force or not leader_id or leader_id == RUNNER_PROCESS_ID or lease_expired:
+                    cur.execute(
+                        "INSERT INTO state (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+                        ("runner_leader_id", RUNNER_PROCESS_ID),
+                    )
+                    cur.execute(
+                        "INSERT INTO state (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+                        ("runner_last_heartbeat", now_iso),
+                    )
+                    return True
+                return False
+    except psycopg2.Error:
+        logger.exception("Failed to claim runner leader")
+        return False
+
+
+def heartbeat_runner(force_claim=False):
+    if force_claim and not claim_runner_leader(force=True):
+        return False
+    leader_id = get_state_text("runner_leader_id", "")
+    if leader_id and leader_id != RUNNER_PROCESS_ID and not force_claim:
+        return False
+    now = utc_now()
+    return set_state_values({
+        "runner_leader_id": RUNNER_PROCESS_ID,
+        "runner_last_heartbeat": to_iso(now),
+    })
+
+
+def acquire_cycle_lock():
+    if not DATABASE_URL:
+        return False, "db_unavailable"
+    now = utc_now()
+    until = now + timedelta(seconds=RUNNER_CYCLE_LOCK_TIMEOUT_SECONDS)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT key, value FROM state WHERE key IN ('runner_cycle_lock_owner','runner_cycle_lock_until') FOR UPDATE")
+                rows = {key: value for key, value in cur.fetchall()}
+                owner = rows.get("runner_cycle_lock_owner", "")
+                lock_until = iso_to_datetime(rows.get("runner_cycle_lock_until", ""))
+                if owner and owner != RUNNER_PROCESS_ID and lock_until and lock_until > now:
+                    return False, owner
+                cur.execute(
+                    "INSERT INTO state (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+                    ("runner_cycle_lock_owner", RUNNER_PROCESS_ID),
+                )
+                cur.execute(
+                    "INSERT INTO state (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+                    ("runner_cycle_lock_until", to_iso(until)),
+                )
+        return True, "ok"
+    except psycopg2.Error:
+        logger.exception("Failed to acquire cycle lock")
+        return False, "lock_error"
+
+
+def release_cycle_lock():
+    if not DATABASE_URL:
+        return False
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM state WHERE key='runner_cycle_lock_owner' FOR UPDATE")
+                row = cur.fetchone()
+                if row and row[0] == RUNNER_PROCESS_ID:
+                    cur.execute("UPDATE state SET value='' WHERE key='runner_cycle_lock_owner'")
+                    cur.execute("UPDATE state SET value='' WHERE key='runner_cycle_lock_until'")
+        return True
+    except psycopg2.Error:
+        logger.exception("Failed to release cycle lock")
+        return False
+
+
+def cycle_due():
+    if not is_runner_enabled():
+        return False
+    now = utc_now()
+    last_finished = iso_to_datetime(get_state_text("last_cycle_finished_at", ""))
+    last_started = iso_to_datetime(get_state_text("last_cycle_started_at", ""))
+    reference = last_finished or last_started
+    if not reference:
+        return True
+    return (now - reference).total_seconds() >= BET_LOOP_INTERVAL_SECONDS
+
+
+def save_runner_cycle_row(cycle_id, trigger, started_at):
+    if not DATABASE_URL:
+        return False
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO runner_cycles (id, trigger, started_at, status)
+                    VALUES (%s, %s, %s, 'started')
+                    ON CONFLICT (id) DO UPDATE SET trigger=EXCLUDED.trigger, started_at=EXCLUDED.started_at, status='started'
+                    """,
+                    (cycle_id, trigger, started_at),
+                )
+        return True
+    except psycopg2.Error:
+        logger.exception("Failed to save runner cycle row id=%s", cycle_id)
+        return False
+
+
+def finalize_runner_cycle_row(cycle_id, status, finished_at, duration_ms, result=None, error_text=""):
+    result = result or {}
+    summary = LAST_CYCLE_DATA.get("summary", {})
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE runner_cycles
+                    SET finished_at=%s,
+                        status=%s,
+                        duration_ms=%s,
+                        analyzed=%s,
+                        shortlist=%s,
+                        selected=%s,
+                        watchlist=%s,
+                        rejected=%s,
+                        obvious_selected=%s,
+                        error_text=%s,
+                        summary_json=%s
+                    WHERE id=%s
+                    """,
+                    (
+                        finished_at,
+                        status,
+                        int(duration_ms),
+                        int(result.get("analyzed", 0)),
+                        int(result.get("shortlisted", 0)),
+                        int(result.get("selected", 0)),
+                        int(result.get("watchlist", 0)),
+                        len(result.get("rejected", [])) if isinstance(result.get("rejected"), list) else int(result.get("rejected", 0)),
+                        int(summary.get("obvious_selected", 0)),
+                        (error_text or "")[:1000],
+                        json.dumps(summary, ensure_ascii=False),
+                        cycle_id,
+                    ),
+                )
+        return True
+    except psycopg2.Error:
+        logger.exception("Failed to finalize runner cycle row id=%s", cycle_id)
+        return False
+
+
+def execute_bot_cycle(trigger="manual"):
+    started_at = utc_now()
+    cycle_id = str(uuid.uuid4())
+    heartbeat_runner(force_claim=(trigger == "auto"))
+    locked, lock_reason = acquire_cycle_lock()
+    if not locked:
+        set_state_values({
+            "last_cycle_status": "skipped",
+            "last_cycle_error": f"cycle_lock_busy:{lock_reason}",
+            "runner_health_state": "healthy" if is_runner_enabled() else "stopped",
+        })
+        return {
+            "cycle_id": cycle_id,
+            "analyzed": 0,
+            "shortlisted": 0,
+            "selected": 0,
+            "watchlist": 0,
+            "placed": [],
+            "rejected": [],
+            "skipped": True,
+            "skip_reason": "cycle_lock_busy",
+        }
+    save_runner_cycle_row(cycle_id, trigger, started_at)
+    set_state_values({
+        "last_cycle_started_at": to_iso(started_at),
+        "last_cycle_status": "running",
+        "last_cycle_error": "",
+        "runner_health_state": "healthy",
+    })
+    logger.info("Runner cycle start trigger=%s cycle_id=%s leader=%s", trigger, cycle_id, RUNNER_PROCESS_ID)
+    try:
+        result = run_bot_cycle(cycle_id=cycle_id)
+        finished_at = utc_now()
+        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+        set_state_values({
+            "last_cycle_finished_at": to_iso(finished_at),
+            "last_cycle_status": "success",
+            "last_cycle_duration_ms": duration_ms,
+            "last_cycle_error": "",
+            "last_cycle_analyzed": result.get("analyzed", 0),
+            "last_cycle_shortlist": result.get("shortlisted", 0),
+            "last_cycle_selected": result.get("selected", 0),
+            "last_cycle_watchlist": result.get("watchlist", 0),
+            "last_cycle_rejected": len(result.get("rejected", [])),
+            "last_successful_cycle_at": to_iso(finished_at),
+            "runner_health_state": "healthy",
+        })
+        finalize_runner_cycle_row(cycle_id, "success", finished_at, duration_ms, result=result)
+        logger.info(
+            "Runner cycle success trigger=%s cycle_id=%s duration_ms=%s analyzed=%s shortlist=%s selected=%s watchlist=%s rejected=%s obvious=%s",
+            trigger,
+            cycle_id,
+            duration_ms,
+            result.get("analyzed", 0),
+            result.get("shortlisted", 0),
+            result.get("selected", 0),
+            result.get("watchlist", 0),
+            len(result.get("rejected", [])),
+            LAST_CYCLE_DATA.get("summary", {}).get("obvious_selected", 0),
+        )
+        return result
+    except Exception as exc:
+        finished_at = utc_now()
+        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+        error_text = f"{type(exc).__name__}: {exc}"
+        set_state_values({
+            "last_cycle_finished_at": to_iso(finished_at),
+            "last_cycle_status": "error",
+            "last_cycle_duration_ms": duration_ms,
+            "last_cycle_error": error_text[:1000],
+            "last_cycle_analyzed": 0,
+            "last_cycle_shortlist": 0,
+            "last_cycle_selected": 0,
+            "last_cycle_watchlist": 0,
+            "last_cycle_rejected": 0,
+            "runner_health_state": "delayed",
+        })
+        finalize_runner_cycle_row(cycle_id, "error", finished_at, duration_ms, error_text=error_text)
+        logger.exception("Runner cycle failed trigger=%s cycle_id=%s", trigger, cycle_id)
+        raise
+    finally:
+        heartbeat_runner()
+        release_cycle_lock()
+
+
+def get_recent_runner_cycles(limit=20):
+    if not DATABASE_URL:
+        return []
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM runner_cycles ORDER BY started_at DESC LIMIT %s", (limit,))
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+    except psycopg2.Error:
+        logger.exception("Failed to fetch runner cycles")
+        return []
+
+
+def build_runner_status():
+    now = utc_now()
+    last_started = iso_to_datetime(get_state_text("last_cycle_started_at", ""))
+    last_finished = iso_to_datetime(get_state_text("last_cycle_finished_at", ""))
+    last_success = iso_to_datetime(get_state_text("last_successful_cycle_at", ""))
+    last_heartbeat = iso_to_datetime(get_state_text("runner_last_heartbeat", ""))
+    runner_enabled = is_runner_enabled()
+    if not runner_enabled:
+        health = "stopped"
+    elif not last_heartbeat:
+        health = "stale"
+    else:
+        age = (now - last_heartbeat).total_seconds()
+        if age <= RUNNER_HEARTBEAT_SECONDS * 2:
+            health = "healthy"
+        elif age <= RUNNER_STALE_AFTER_SECONDS:
+            health = "delayed"
+        else:
+            health = "stale"
+    if get_state_text("last_cycle_status", "never") == "error" and health == "healthy":
+        health = "delayed"
+    set_state("runner_health_state", health)
+    recent_cycles = get_recent_runner_cycles(limit=30)
+    cutoff = now - timedelta(hours=1)
+    cycles_last_hour = sum(1 for item in recent_cycles if item.get("started_at") and item["started_at"] >= cutoff)
+    recent_successes = [item for item in recent_cycles if item.get("status") == "success"][:5]
+    zero_entry_streak = 0
+    for item in recent_successes:
+        if int(item.get("selected") or 0) == 0:
+            zero_entry_streak += 1
+        else:
+            break
+    serialized_recent_cycles = []
+    for item in recent_cycles[:10]:
+        serialized_recent_cycles.append({
+            **item,
+            "started_at": to_iso(item.get("started_at")),
+            "finished_at": to_iso(item.get("finished_at")),
+        })
+    last_error = get_state_text("last_cycle_error", "")
+    if not runner_enabled:
+        summary = "Runner detenido."
+    elif health == "healthy" and last_success:
+        summary = f"Runner saludable. Último ciclo exitoso hace {format_age_seconds((now - last_success).total_seconds())}."
+    elif health == "delayed" and last_started:
+        summary = f"Runner demorado. Último ciclo hace {format_age_seconds((now - last_started).total_seconds())}."
+    else:
+        reference = last_started or last_success
+        summary = f"Runner stale. No hubo ciclos recientes." if not reference else f"Runner stale. No hubo ciclos hace {format_age_seconds((now - reference).total_seconds())}."
+    if last_error and get_state_text("last_cycle_status", "") == "error":
+        summary = f"{summary} Último ciclo falló: {last_error[:160]}"
+    elif zero_entry_streak >= 3:
+        summary = f"{summary} El runner está activo pero no encontró entradas en los últimos {zero_entry_streak} ciclos."
+    return {
+        "runner_enabled": runner_enabled,
+        "runner_process_id": RUNNER_PROCESS_ID,
+        "runner_leader_id": get_state_text("runner_leader_id", ""),
+        "runner_last_heartbeat": to_iso(last_heartbeat),
+        "runner_health_state": health,
+        "runner_stale_after_seconds": RUNNER_STALE_AFTER_SECONDS,
+        "last_cycle_started_at": to_iso(last_started),
+        "last_cycle_finished_at": to_iso(last_finished),
+        "last_cycle_status": get_state_text("last_cycle_status", "never"),
+        "last_cycle_duration_ms": int(get_state("last_cycle_duration_ms", 0)),
+        "last_cycle_error": last_error,
+        "last_cycle_analyzed": int(get_state("last_cycle_analyzed", 0)),
+        "last_cycle_shortlist": int(get_state("last_cycle_shortlist", 0)),
+        "last_cycle_selected": int(get_state("last_cycle_selected", 0)),
+        "last_cycle_watchlist": int(get_state("last_cycle_watchlist", 0)),
+        "last_cycle_rejected": int(get_state("last_cycle_rejected", 0)),
+        "last_successful_cycle_at": to_iso(last_success),
+        "cycles_last_hour": cycles_last_hour,
+        "runner_summary": summary,
+        "recent_cycles": serialized_recent_cycles,
+    }
 
 
 def get_current_lab_epoch():
@@ -2141,8 +2576,8 @@ def resolve_bet_real(bet_id):
         logger.exception("Real resolution failed for bet id=%s", bet_id)
 
 
-def run_bot_cycle():
-    cycle_id = str(uuid.uuid4())
+def run_bot_cycle(cycle_id=None):
+    cycle_id = cycle_id or str(uuid.uuid4())
     markets = fetch_active_markets()
     all_bets = get_current_lab_bets()
     open_bets = get_open_bets(all_bets)
@@ -2376,6 +2811,7 @@ def aggregate_metrics():
     top_winning_patterns = Counter({key: round(value, 2) for key, value in by_thesis.items() if value > 0}).most_common(3)
     top_losing_patterns = Counter({key: round(abs(value), 2) for key, value in by_thesis.items() if value < 0}).most_common(3)
     overlap_concentration = round(max(snapshot["category_exposure"].values(), default=0.0) / max(snapshot["committed"], 1.0), 4) if snapshot["committed"] else 0.0
+    runner_status = build_runner_status()
     return {
         "balance": snapshot["free_balance"],
         "capital_committed": snapshot["committed"],
@@ -2440,21 +2876,25 @@ def aggregate_metrics():
         "paper_starting_balance": get_paper_starting_balance(),
         "average_bets_per_cycle": round(int(get_state("bets_placed", 0)) / max(1, int(get_state("cycles_run", 0))), 2),
         "trades_last_hour": len(recent_opened),
+        "cycles_last_hour": runner_status["cycles_last_hour"],
         "core_open": snapshot["core_open"],
         "secondary_open": snapshot["secondary_open"],
         "experimental_open": snapshot["experimental_open"],
         "coverage_breadth": len(snapshot["category_exposure"]),
         "overlap_concentration": overlap_concentration,
         "capital_efficiency": round((realized_pnl + unrealized_pnl) / max(snapshot["committed"], 1.0), 4) if snapshot["committed"] else 0.0,
+        **runner_status,
     }
 
 
 @app.route("/bot-bet", methods=["POST"])
 def bot_bet():
     try:
-        result = run_bot_cycle()
+        result = execute_bot_cycle(trigger="manual")
         placed = result["placed"]
         summary = LAST_CYCLE_DATA.get("summary", {})
+        if result.get("skipped"):
+            return jsonify({"message": "Ciclo omitido por lock activo. Otro runner ya está ejecutando.", "reasoning": result.get("skip_reason", ""), "placed": 0, "cycle_id": result["cycle_id"], "skipped": True})
         if not placed:
             return jsonify({"message": summary.get("headline", f"Sin trades nuevos. Analizados {result['analyzed']}, shortlist {result['shortlisted']}, watchlist {result.get('watchlist', 0)}."), "reasoning": " | ".join(f"{key}: {value}" for key, value in list(summary.get("blockers", {}).items())[:3]), "placed": 0, "cycle_id": result["cycle_id"]})
         return jsonify({"message": summary.get("headline", f"Portfolio actualizado: {len(placed)} trades nuevos."), "reasoning": "; ".join([bet.get("reasoning", "") for bet in placed[:4]]), "placed": len(placed), "cycle_id": result["cycle_id"]})
@@ -2472,6 +2912,48 @@ def manual_monitor():
 @app.route("/metrics")
 def metrics():
     return jsonify(aggregate_metrics())
+
+
+@app.route("/runner-status")
+def runner_status():
+    return jsonify(build_runner_status())
+
+
+@app.route("/runner-start", methods=["POST"])
+def runner_start():
+    set_runner_enabled(True)
+    started = start_background_loops() or claim_runner_leader(force=True)
+    heartbeat_runner(force_claim=True)
+    return jsonify({"ok": True, "started": bool(started), "message": "Runner habilitado.", "runner": build_runner_status()})
+
+
+@app.route("/runner-stop", methods=["POST"])
+def runner_stop():
+    set_runner_enabled(False)
+    release_cycle_lock()
+    return jsonify({"ok": True, "message": "Runner detenido.", "runner": build_runner_status()})
+
+
+@app.route("/runner-restart", methods=["POST"])
+def runner_restart():
+    set_runner_enabled(True)
+    release_cycle_lock()
+    claim_runner_leader(force=True)
+    heartbeat_runner(force_claim=True)
+    started = start_background_loops()
+    return jsonify({"ok": True, "started": bool(started), "message": "Runner reiniciado.", "runner": build_runner_status()})
+
+
+@app.route("/runner-debug")
+def runner_debug():
+    status = build_runner_status()
+    return jsonify({
+        **status,
+        "bet_loop_interval_seconds": BET_LOOP_INTERVAL_SECONDS,
+        "runner_heartbeat_seconds": RUNNER_HEARTBEAT_SECONDS,
+        "runner_lease_seconds": RUNNER_LEASE_SECONDS,
+        "runner_cycle_lock_timeout_seconds": RUNNER_CYCLE_LOCK_TIMEOUT_SECONDS,
+    })
 
 
 @app.route("/markets")
@@ -2654,12 +3136,27 @@ def analysis_debug():
 
 def bet_loop():
     while True:
-        time.sleep(BET_LOOP_INTERVAL_SECONDS)
         try:
-            with app.test_request_context():
-                bot_bet()
+            if not is_runner_enabled():
+                set_state("runner_health_state", "stopped")
+                time.sleep(RUNNER_HEARTBEAT_SECONDS)
+                continue
+            if claim_runner_leader():
+                heartbeat_runner()
+                if cycle_due():
+                    with app.app_context():
+                        execute_bot_cycle(trigger="auto")
+                else:
+                    set_state("runner_health_state", "healthy")
+            time.sleep(RUNNER_HEARTBEAT_SECONDS)
         except Exception:
             logger.exception("bet_loop failed")
+            set_state_values({
+                "runner_health_state": "delayed",
+                "last_cycle_status": "error",
+                "last_cycle_error": "bet_loop_failed",
+            })
+            time.sleep(RUNNER_HEARTBEAT_SECONDS)
 
 
 def monitor_loop():
@@ -2679,6 +3176,9 @@ def start_background_loops():
     with BACKGROUND_LOOPS_LOCK:
         if BACKGROUND_LOOPS_STARTED:
             return False
+        set_runner_enabled(True)
+        claim_runner_leader(force=True)
+        heartbeat_runner(force_claim=True)
         threading.Thread(target=bet_loop, daemon=True, name="bet-loop").start()
         threading.Thread(target=monitor_loop, daemon=True, name="monitor-loop").start()
         BACKGROUND_LOOPS_STARTED = True
@@ -2767,12 +3267,14 @@ summary{cursor:pointer;font-weight:700}
         <div class="pill" id="strategy-pill">Strategy: —</div>
         <div class="pill" id="bankroll-pill">Bankroll inicial: —</div>
         <div class="pill" id="legacy-pill">Legacy archivado: —</div>
+        <div class="pill" id="runner-pill">Runner: —</div>
       </div>
     </div>
     <div class="actions">
       <button class="btn" onclick="loadAll()">Actualizar</button>
       <button class="btn" onclick="doMonitor()">Monitor</button>
       <button class="btn btn-primary" onclick="runCycle()">Correr ciclo</button>
+      <button class="btn" onclick="restartRunner()">Restart runner</button>
       <button class="btn btn-secondary" onclick="fundPaper()">Fund paper</button>
       <button class="btn btn-danger" onclick="resetLab()">Reset lab</button>
     </div>
@@ -2871,6 +3373,7 @@ summary{cursor:pointer;font-weight:700}
           </div>
         </div>
         <details open><summary>Performance summary</summary><div class="summary-copy" id="perf-summary">Cargando…</div></details>
+        <details open><summary>Runner telemetry</summary><div class="summary-copy" id="runner-summary">Cargando…</div></details>
         <details><summary>Portfolio mix</summary><div class="summary-copy" id="mix-summary">Cargando…</div></details>
         <details><summary>Learning metrics</summary><div class="summary-copy" id="learning-summary">Cargando…</div></details>
         <details><summary>Winning / losing patterns</summary><div class="summary-copy" id="pattern-summary">Cargando…</div></details>
@@ -2885,6 +3388,7 @@ function pct(value){return Math.round((value||0)*100)+'%'}
 function metricClass(value){return value>0?'positive':value<0?'negative':'neutral'}
 function titleCase(value){return (value||'—').replaceAll('_',' ')}
 function bucketLabel(value){return value==='experimental'?'exploratory':titleCase(value)}
+function timeAgo(value){if(!value)return '—';const then=new Date(value);const diff=Math.max(0,Math.floor((Date.now()-then.getTime())/1000));if(diff<60)return `${diff}s`;const m=Math.floor(diff/60);if(m<60)return `${m}m`;const h=Math.floor(m/60);if(h<24)return `${h}h ${m%60}m`;const d=Math.floor(h/24);return `${d}d ${h%24}h`}
 function objectLines(obj, empty='—'){const entries=Object.entries(obj||{});if(!entries.length)return empty;return entries.map(([k,v])=>`${titleCase(k)}: ${typeof v==='object'?JSON.stringify(v):v}`).join('<br>')}
 async function postJson(url,payload){const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});return res.json()}
 
@@ -2893,11 +3397,12 @@ function setValue(id,text,raw){const el=document.getElementById(id);el.textConte
 function renderTradeCard(b){return `<div class='trade-card'><div class='trade-top'><div><div class='trade-q'>${b.question}</div><div class='badge-row'><span class='badge ${b.trade_class}'>${bucketLabel(b.trade_class)}</span><span class='badge'>${b.tier}</span><span class='badge'>${b.horizon_bucket||'—'}</span><span class='badge'>${b.category}</span>${b.obvious_trade_override?"<span class='badge'>obvious</span>":""}</div></div><div class='badge'>${b.status_text}</div></div><div class='trade-grid'><div class='meta-box'><span>Posición</span><strong>${b.side} · ${money(b.amount)}</strong></div><div class='meta-box'><span>PnL</span><strong class='${metricClass(b.pnl||0)}'>${b.pnl_text}</strong></div><div class='meta-box'><span>Entry / Current</span><strong>${b.price_entry||0} / ${b.price_current||0}</strong></div><div class='meta-box'><span>Edge / Confidence</span><strong>${b.edge}pp · ${b.confidence}/10</strong></div><div class='meta-box'><span>Reliability / Ease</span><strong>${b.reliability}% · ${b.ease_of_win}%</strong></div><div class='meta-box'><span>Priority / Rank</span><strong>${b.portfolio_priority_score}% · ${b.relative_rank_score||0}%</strong></div></div><div class='trade-foot'><strong>Señal clave:</strong> ${b.key_signal||'—'}<br><strong>Invalidación:</strong> ${b.invalidation_condition||'—'}<br><strong>Racional:</strong> ${b.reasoning||'—'}</div></div>`}
 function renderWatchCard(item){return `<div class='watch-card'><div class='watch-top'><div><div class='watch-q'>${item.question}</div><div class='badge-row'><span class='badge ${item.trade_class||'watch'}'>${bucketLabel(item.trade_class||'watchlist')}</span><span class='badge'>${item.tier||'—'}</span><span class='badge'>${item.horizon_bucket||'—'}</span>${item.obvious_trade_override?"<span class='badge'>obvious</span>":""}</div></div></div><div class='trade-grid'><div class='meta-box'><span>Priority</span><strong>${Math.round((item.portfolio_priority_score||0)*100)}%</strong></div><div class='meta-box'><span>Opportunity</span><strong>${Math.round((item.opportunity_score||0)*100)}%</strong></div><div class='meta-box'><span>Reliability</span><strong>${Math.round((item.reliability||0)*100)}%</strong></div><div class='meta-box'><span>Learnability / Ease</span><strong>${Math.round((item.learnability||0)*100)}% · ${Math.round((item.ease_of_win||0)*100)}%</strong></div></div><div class='watch-foot'>${item.reason||'Necesita un poco más de prioridad o espacio en portfolio antes de entrar.'}</div></div>`}
 
-async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Strategy: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Bankroll inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Legacy archivado: ${d.legacy_trades_archived||0}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.7?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*22 + (1-Math.abs((d.portfolio_exposure||0)-0.48))*18 + Math.min((d.positions_per_cycle_last||0)/16,1)*24 + Math.min((d.trades_last_hour||0)/8,1)*16 + Math.min((d.coverage_breadth||0)/8,1)*20));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`Capital libre ${money(d.capital_free)} · comprometido ${money(d.capital_committed)} · ${d.open_current_lab||0} trades abiertos · ${d.trades_last_hour||0} trades en la última hora · avg bets/cycle ${d.average_bets_per_cycle||0}.`;document.getElementById('perf-summary').innerHTML=`PnL total <strong>${money(d.total_pnl)}</strong>. Realizado <strong>${money(d.realized_pnl)}</strong>, unrealized <strong>${money(d.unrealized_pnl)}</strong>. Hold medio <strong>${d.average_hold_time_hours||0}h</strong> y feedback temprano en <strong>${d.early_feedback_pct||0}%</strong> de los trades cerrados.`;document.getElementById('mix-summary').innerHTML=`Counts por bucket:<br>${objectLines(d.open_count_by_bucket,'Todavía no hay trades abiertos.')}<br><br>Capital por bucket:<br>${objectLines(d.open_amount_by_bucket,'Todavía no hay capital desplegado.')}<br><br>Average size por bucket:<br>${objectLines(d.average_size_by_bucket,'Todavía no hay tamaños para resumir.')}<br><br>Priority media por bucket:<br>${objectLines(d.average_priority_by_bucket,'Sin quality summary todavía.')}<br><br>Exposure por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Exposure por horizon:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay posiciones abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Winrate por bucket:<br>${objectLines(d.winrate_core_vs_exploratory,'Aún no hay historial suficiente.')}<br><br>Winrate por learning velocity:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Winrate por time bucket:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay buckets suficientes.')}<br><br>Obvious trades último ciclo: <strong>${d.obvious_trades_last_cycle||0}</strong>`;document.getElementById('pattern-summary').innerHTML=`Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}<br>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>PnL por bucket:<br>${objectLines(d.pnl_by_trade_class,'Todavía no hay PnL por bucket.')}<br><br>Performance obvious vs non-obvious:<br>${objectLines(d.performance_by_obviousness,'Todavía no hay suficiente historial.')}`;document.getElementById('debug-summary').innerHTML=`Legacy archivados: <strong>${d.legacy_trades_archived||0}</strong><br>Descartados por evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartados por correlación/exposure: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Selected / watchlist / rejected: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong><br>Trades última hora: <strong>${d.trades_last_hour||0}</strong>`}
-async function loadCycle(){const d=await fetch('/candidate-scores').then(r=>r.json());const s=d.summary||{};document.getElementById('cycle-message').textContent=s.headline||'Todavía no hay resumen del último ciclo.';document.getElementById('cycle-analyzed').textContent=s.analyzed||0;document.getElementById('cycle-shortlist').textContent=s.shortlist||0;document.getElementById('cycle-selected').textContent=s.selected||0;document.getElementById('cycle-watchlist').textContent=s.watchlist||0;document.getElementById('cycle-rejected').textContent=s.rejected||0;document.getElementById('cycle-mix').innerHTML=`<div class='metric-item'><span>Core</span><strong>${s.core_selected||0}</strong></div><div class='metric-item'><span>Secondary</span><strong>${s.secondary_selected||0}</strong></div><div class='metric-item'><span>Exploratory</span><strong>${s.exploratory_selected||0}</strong></div><div class='metric-item'><span>Obvious overrides</span><strong>${s.obvious_selected||0}</strong></div>`;const blockers=Object.entries(d.blockers||{});document.getElementById('blockers').innerHTML=blockers.length?blockers.map(([k,v])=>`<div class='reason-item'><span>${titleCase(k)}</span><strong>${v}</strong></div>`).join(''):"<div class='reason-item'><span>No hubo bloqueos relevantes en el último ciclo.</span><strong>OK</strong></div>";document.getElementById('watchlist').innerHTML=(d.watchlist||[]).length?(d.watchlist||[]).slice(0,8).map(renderWatchCard).join(''):"<div class='empty'>No hay candidatos en watchlist en este ciclo.</div>";document.getElementById('live-tag').textContent=(s.selected||0)>0?'Operando':(s.watchlist||0)>0?'Observando':'En espera';document.getElementById('bot-status').textContent=(s.selected||0)>0?'Bot operando':(s.watchlist||0)>0?'Bot viendo oportunidades':'Bot en espera';document.getElementById('bot-reasoning').textContent=s.headline||'Todavía no hay actividad reciente suficiente.'}
+async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Strategy: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Bankroll inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Legacy archivado: ${d.legacy_trades_archived||0}`;document.getElementById('runner-pill').textContent=`Runner: ${titleCase(d.runner_health_state||'unknown')}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.7?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*18 + (1-Math.abs((d.portfolio_exposure||0)-0.48))*16 + Math.min((d.positions_per_cycle_last||0)/16,1)*18 + Math.min((d.trades_last_hour||0)/8,1)*12 + Math.min((d.coverage_breadth||0)/8,1)*16 + ((d.runner_health_state||'stale')==='healthy'?20:(d.runner_health_state||'stale')==='delayed'?10:0)));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`${d.runner_summary||'Sin estado de runner.'} Capital libre ${money(d.capital_free)} · comprometido ${money(d.capital_committed)} · ${d.open_current_lab||0} trades abiertos · ${d.trades_last_hour||0} trades en la última hora · ${d.cycles_last_hour||0} ciclos en la última hora.`;document.getElementById('perf-summary').innerHTML=`PnL total <strong>${money(d.total_pnl)}</strong>. Realizado <strong>${money(d.realized_pnl)}</strong>, unrealized <strong>${money(d.unrealized_pnl)}</strong>. Hold medio <strong>${d.average_hold_time_hours||0}h</strong> y feedback temprano en <strong>${d.early_feedback_pct||0}%</strong> de los trades cerrados.`;document.getElementById('runner-summary').innerHTML=`Health: <strong>${titleCase(d.runner_health_state||'unknown')}</strong><br>Último heartbeat: <strong>${timeAgo(d.runner_last_heartbeat)}</strong><br>Último ciclo iniciado: <strong>${timeAgo(d.last_cycle_started_at)}</strong><br>Último ciclo terminado: <strong>${timeAgo(d.last_cycle_finished_at)}</strong><br>Último ciclo exitoso: <strong>${timeAgo(d.last_successful_cycle_at)}</strong><br>Status último ciclo: <strong>${titleCase(d.last_cycle_status||'never')}</strong><br>Duración último ciclo: <strong>${Math.round((d.last_cycle_duration_ms||0)/1000)}s</strong><br>Counts último ciclo: <strong>${d.last_cycle_analyzed||0}</strong> analyzed / <strong>${d.last_cycle_shortlist||0}</strong> shortlist / <strong>${d.last_cycle_selected||0}</strong> selected / <strong>${d.last_cycle_watchlist||0}</strong> watchlist / <strong>${d.last_cycle_rejected||0}</strong> rejected<br>Ciclos última hora: <strong>${d.cycles_last_hour||0}</strong> · Trades abiertos última hora: <strong>${d.trades_last_hour||0}</strong>${d.last_cycle_error?`<br>Último error: <strong>${d.last_cycle_error}</strong>`:''}`;document.getElementById('mix-summary').innerHTML=`Counts por bucket:<br>${objectLines(d.open_count_by_bucket,'Todavía no hay trades abiertos.')}<br><br>Capital por bucket:<br>${objectLines(d.open_amount_by_bucket,'Todavía no hay capital desplegado.')}<br><br>Average size por bucket:<br>${objectLines(d.average_size_by_bucket,'Todavía no hay tamaños para resumir.')}<br><br>Priority media por bucket:<br>${objectLines(d.average_priority_by_bucket,'Sin quality summary todavía.')}<br><br>Exposure por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Exposure por horizon:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay posiciones abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Winrate por bucket:<br>${objectLines(d.winrate_core_vs_exploratory,'Aún no hay historial suficiente.')}<br><br>Winrate por learning velocity:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Winrate por time bucket:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay buckets suficientes.')}<br><br>Obvious trades último ciclo: <strong>${d.obvious_trades_last_cycle||0}</strong>`;document.getElementById('pattern-summary').innerHTML=`Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}<br>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>PnL por bucket:<br>${objectLines(d.pnl_by_trade_class,'Todavía no hay PnL por bucket.')}<br><br>Performance obvious vs non-obvious:<br>${objectLines(d.performance_by_obviousness,'Todavía no hay suficiente historial.')}`;document.getElementById('debug-summary').innerHTML=`Leader actual: <strong>${d.runner_leader_id||'—'}</strong><br>Legacy archivados: <strong>${d.legacy_trades_archived||0}</strong><br>Descartados por evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartados por correlación/exposure: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Selected / watchlist / rejected: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong><br>Trades última hora: <strong>${d.trades_last_hour||0}</strong> · Ciclos última hora: <strong>${d.cycles_last_hour||0}</strong>`}
+async function loadCycle(){const d=await fetch('/candidate-scores').then(r=>r.json());const runner=await fetch('/runner-status').then(r=>r.json());const s=d.summary||{};document.getElementById('cycle-message').textContent=s.headline||'Todavía no hay resumen del último ciclo.';document.getElementById('cycle-analyzed').textContent=s.analyzed||0;document.getElementById('cycle-shortlist').textContent=s.shortlist||0;document.getElementById('cycle-selected').textContent=s.selected||0;document.getElementById('cycle-watchlist').textContent=s.watchlist||0;document.getElementById('cycle-rejected').textContent=s.rejected||0;document.getElementById('cycle-mix').innerHTML=`<div class='metric-item'><span>Core</span><strong>${s.core_selected||0}</strong></div><div class='metric-item'><span>Secondary</span><strong>${s.secondary_selected||0}</strong></div><div class='metric-item'><span>Exploratory</span><strong>${s.exploratory_selected||0}</strong></div><div class='metric-item'><span>Obvious overrides</span><strong>${s.obvious_selected||0}</strong></div>`;const blockers=Object.entries(d.blockers||{});document.getElementById('blockers').innerHTML=blockers.length?blockers.map(([k,v])=>`<div class='reason-item'><span>${titleCase(k)}</span><strong>${v}</strong></div>`).join(''):"<div class='reason-item'><span>No hubo bloqueos relevantes en el último ciclo.</span><strong>OK</strong></div>";document.getElementById('watchlist').innerHTML=(d.watchlist||[]).length?(d.watchlist||[]).slice(0,8).map(renderWatchCard).join(''):"<div class='empty'>No hay candidatos en watchlist en este ciclo.</div>";document.getElementById('live-tag').textContent=(runner.runner_health_state||'stale')==='healthy'?'Runner healthy':(runner.runner_health_state||'stale')==='delayed'?'Runner delayed':'Runner stale';document.getElementById('bot-status').textContent=(runner.runner_health_state||'stale')==='healthy'?'Runner activo':(runner.runner_health_state||'stale')==='delayed'?'Runner demorado':'Runner stale';document.getElementById('bot-reasoning').textContent=runner.runner_summary||s.headline||'Todavía no hay actividad reciente suficiente.'}
 async function loadBets(){const d=await fetch('/bets').then(r=>r.json());document.getElementById('bets').innerHTML=d.length?d.map(renderTradeCard).join(''):"<div class='empty'>Todavía no hay trades en este laboratorio.</div>"}
 async function runCycle(){document.getElementById('bot-status').textContent='Corriendo ciclo';document.getElementById('bot-reasoning').textContent='Investigando mercados, armando ranking y evaluando entradas.';const d=await fetch('/bot-bet',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.placed?'Bot operando':'Bot en espera';document.getElementById('bot-reasoning').textContent=d.message||d.reasoning||'';await loadAll()}
 async function doMonitor(){document.getElementById('bot-status').textContent='Monitoreando portfolio';const d=await fetch('/monitor',{method:'POST'}).then(r=>r.json());document.getElementById('bot-reasoning').textContent=d.message||'Monitor ejecutado';await loadAll()}
+async function restartRunner(){document.getElementById('bot-status').textContent='Reiniciando runner';const d=await fetch('/runner-restart',{method:'POST'}).then(r=>r.json());document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
 async function resetLab(){if(!confirm('Esto archivará el laboratorio actual y arrancará uno nuevo. ¿Continuar?'))return;const balance=prompt('Balance inicial del nuevo lab','50000');const d=await postJson('/lab-reset',{balance:Number(balance||50000)});document.getElementById('bot-status').textContent=d.ok?'Lab reseteado':'Error al resetear';document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
 async function fundPaper(){const amount=prompt('Capital paper a agregar','10000');if(!amount)return;const d=await postJson('/fund-paper',{amount:Number(amount)});document.getElementById('bot-status').textContent=d.ok?'Capital agregado':'No se pudo agregar capital';document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
 async function loadAll(){await Promise.all([loadMetrics(),loadCycle(),loadBets()])}
@@ -3010,6 +3515,12 @@ def test_metaculus():
 @app.route("/test-wiki")
 def test_wiki():
     return jsonify(fetch_wikipedia_source("Will Viktor Orban remain Prime Minister of Hungary"))
+
+
+# Safe autostart: multiple web workers may import this module, so the runner
+# uses a persisted leader lease + cycle lock to avoid duplicate execution.
+if ENABLE_BACKGROUND_LOOPS:
+    start_background_loops()
 
 
 if __name__ == "__main__":
