@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg2
 import requests
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, url_for
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
@@ -3446,7 +3446,7 @@ summary{cursor:pointer;font-weight:700;color:#eef5ee;text-transform:uppercase;le
   <div class="topbar">
     <div class="title-block">
       <div class="logo-lockup" aria-label="Polymarket Bot 404">
-        <img class="logo-image" src="/static/polymarket-404.png" alt="Polymarket Bot 404">
+        <img class="logo-image" src="{{ logo_url }}" alt="Polymarket Bot 404">
       </div>
       <div class="pill-row">
         <div class="pill" id="lab-pill">Lab activo: —</div>
@@ -3660,7 +3660,7 @@ loadAll();setInterval(loadAll,12000)
 
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    return render_template_string(HTML, logo_url=url_for("static", filename="polymarket-404.png"))
 
 
 @app.before_request
