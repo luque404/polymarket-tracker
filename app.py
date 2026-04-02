@@ -1156,12 +1156,21 @@ def is_duplicate_or_near_duplicate(candidate, existing_bets, selected):
         same_side = bet.get("side") == candidate.get("side")
         same_thesis = bet.get("thesis_type") == candidate.get("thesis_type")
         same_semantic_key = bool(identity["semantic_key"] and other_semantic_key and identity["semantic_key"] == other_semantic_key)
-        strong_overlap = overlap >= 8
-        very_strong_overlap = overlap >= 10
-        semantically_same_trade = same_side and same_semantic_key and overlap >= 4
+        strong_overlap = overlap >= 10
+        very_strong_overlap = overlap >= 12
+        semantically_same_trade = same_side and same_semantic_key and overlap >= 6
         near_identical_surface = same_side and same_category and same_thesis and strong_overlap
-        broad_clone = same_side and very_strong_overlap and (same_category or same_thesis)
+        broad_clone = same_side and same_category and same_thesis and very_strong_overlap
         if semantically_same_trade or near_identical_surface or broad_clone:
+            candidate["duplicate_reason_detail"] = {
+                "against_market_id": bet.get("market_id"),
+                "overlap": overlap,
+                "same_semantic_key": same_semantic_key,
+                "same_category": same_category,
+                "same_thesis": same_thesis,
+                "same_side": same_side,
+                "terms": overlap_terms[:8],
+            }
             logger.info(
                 "Duplicate overlap blocked market_id=%s against=%s overlap=%s same_semantic=%s same_category=%s same_thesis=%s same_side=%s terms=%s",
                 candidate.get("market_id"),
@@ -1174,7 +1183,7 @@ def is_duplicate_or_near_duplicate(candidate, existing_bets, selected):
                 ",".join(overlap_terms[:8]),
             )
             return True, "duplicate_semantic_overlap"
-        if overlap >= 5 and same_side and (same_category or same_thesis):
+        if overlap >= 7 and same_side and (same_category or same_thesis):
             logger.info(
                 "Duplicate overlap allowed market_id=%s against=%s overlap=%s same_semantic=%s same_category=%s same_thesis=%s same_side=%s terms=%s",
                 candidate.get("market_id"),
@@ -1537,10 +1546,10 @@ def compute_expected_value(packet, analysis, side):
     market_side_price = compute_current_side_price(side, safe_float(packet.get("market_prob"), 0.5))
     model_side_prob = compute_current_side_price(side, clamp(safe_float(analysis.get("real_prob"), packet.get("market_prob", 0.5)), 0.01, 0.99))
     fee_drag = 0.008
-    spread_drag = safe_float(packet.get("spread"), 0.0) * 0.55
-    slippage_drag = safe_float(packet.get("spread"), 0.0) * 0.35 + (0.018 if packet.get("spread_quality_bucket") == "poor" else 0.010 if packet.get("spread_quality_bucket") == "wide" else 0.0)
+    spread_drag = safe_float(packet.get("spread"), 0.0) * 0.28
+    slippage_drag = safe_float(packet.get("spread"), 0.0) * 0.12 + (0.010 if packet.get("spread_quality_bucket") == "poor" else 0.004 if packet.get("spread_quality_bucket") == "wide" else 0.0)
     if packet.get("market_family") == "low_liquidity":
-        slippage_drag += 0.012
+        slippage_drag += 0.006
     expected_value = model_side_prob - market_side_price - fee_drag - spread_drag - slippage_drag
     return round(expected_value, 4), round(model_side_prob, 4), round(market_side_price, 4)
 
@@ -1807,8 +1816,11 @@ def fetch_wikipedia_source(question):
         return {"summary": "", "count": 0, "quality": SOURCE_WEIGHTS["official"]}
 
 
-def fetch_reddit_source(question):
+def fetch_reddit_source(question, cycle_cache=None):
     empty_result = {"summary": "", "count": 0, "score": 0.0, "quality": SOURCE_WEIGHTS["crowd"]}
+    cache_key = normalize_question(question or "").lower()
+    if cycle_cache is not None and cache_key in cycle_cache:
+        return dict(cycle_cache[cache_key])
     try:
         query = " ".join(keyword_tokens(question)[:4]) or question
         response = requests.get(
@@ -1820,19 +1832,30 @@ def fetch_reddit_source(question):
         response.raise_for_status()
         posts = response.json().get("data", {}).get("children", [])
         if not posts:
+            if cycle_cache is not None:
+                cycle_cache[cache_key] = dict(empty_result)
             return empty_result
         titles = [post["data"].get("title", "") for post in posts[:4]]
         avg_score = mean([safe_float(post["data"].get("score")) for post in posts[:4]])
         crowd_score = clamp(avg_score / 30.0, -1.0, 1.0)
-        return {"summary": " | ".join(titles), "count": len(titles), "score": crowd_score, "quality": SOURCE_WEIGHTS["crowd"]}
+        result = {"summary": " | ".join(titles), "count": len(titles), "score": crowd_score, "quality": SOURCE_WEIGHTS["crowd"]}
+        if cycle_cache is not None:
+            cycle_cache[cache_key] = dict(result)
+        return result
     except requests.Timeout:
         logger.warning("Reddit timeout, skipping question=%s", question[:80])
+        if cycle_cache is not None:
+            cycle_cache[cache_key] = dict(empty_result)
         return empty_result
     except requests.RequestException as exc:
         logger.warning("Reddit failed, skipping question=%s error=%s", question[:80], type(exc).__name__)
+        if cycle_cache is not None:
+            cycle_cache[cache_key] = dict(empty_result)
         return empty_result
     except (ValueError, KeyError, TypeError) as exc:
         logger.warning("Reddit parse failed, skipping question=%s error=%s", question[:80], type(exc).__name__)
+        if cycle_cache is not None:
+            cycle_cache[cache_key] = dict(empty_result)
         return empty_result
 
 # ── MEMORY / RESEARCH ENGINE ─────────────────────────────────
@@ -2184,7 +2207,7 @@ def rebalance_trade_mix(candidates, snapshot):
     return ranked
 
 
-def build_research_packet(market, market_prob, all_markets, all_bets):
+def build_research_packet(market, market_prob, all_markets, all_bets, reddit_cache=None):
     semantics = extract_market_semantics(market.get("question", ""))
     question = semantics["normalized_question"]
     category = detect_category(question)
@@ -2193,7 +2216,7 @@ def build_research_packet(market, market_prob, all_markets, all_bets):
     news = fetch_news_source(question)
     metaculus = fetch_metaculus_source(question)
     wiki = fetch_wikipedia_source(question)
-    reddit = fetch_reddit_source(question)
+    reddit = fetch_reddit_source(question, cycle_cache=reddit_cache)
     related_summary, cluster_divergence = summarize_related_markets(market, all_markets)
     forecast_divergence = abs((metaculus.get("forecast") or market_prob) - market_prob)
     thesis_type = detect_thesis_type(question, market_prob, {"external_forecast_divergence": forecast_divergence, "microstructure_dislocation_score": abs(book_data["orderbook_imbalance"]) + cluster_divergence, "crowd_signal_score": reddit.get("score", 0.0), "contradictions_found": 0})
@@ -2553,7 +2576,7 @@ def compute_candidate_score(candidate, open_bets):
         candidate["side"] = side
     expected_value, model_side_prob, market_side_price = compute_expected_value(packet, analysis, side)
     candidate["expected_value"] = expected_value
-    candidate["expected_value_score"] = round(clamp(expected_value * 6.5 + 0.25, 0.0, 1.0), 4) if expected_value > 0 else 0.0
+    candidate["expected_value_score"] = round(clamp(expected_value * 7.0 + 0.28, 0.0, 1.0), 4) if expected_value > -0.002 else 0.0
     candidate["model_side_prob"] = model_side_prob
     candidate["market_side_price"] = market_side_price
     candidate["reliability_score"] = reliability_score
@@ -2594,11 +2617,11 @@ def compute_candidate_score(candidate, open_bets):
     candidate["correlation_penalty"] = round(correlation_penalty, 4)
     candidate["conclusion_reliability_score"] = round(reliability, 4)
     candidate["entry_validation_score"] = compute_entry_validation_score(candidate)
-    if expected_value > 0.05 and candidate["execution_quality_score"] >= 0.52 and candidate["mispricing_severity"] >= 0.56:
+    if expected_value > 0.035 and candidate["execution_quality_score"] >= 0.46 and candidate["mispricing_severity"] >= 0.50:
         entry_class = "sniper"
-    elif expected_value > 0.015:
+    elif expected_value > 0.004:
         entry_class = "standard"
-    elif expected_value > 0:
+    elif expected_value > 0.0005:
         entry_class = "exploratory"
     else:
         entry_class = "skip"
@@ -2821,11 +2844,11 @@ def select_portfolio(candidates, snapshot):
         validation = candidate.get("entry_validation_score", 0.0)
         severity = candidate.get("mispricing_severity", 0.0)
         execution_quality = candidate.get("execution_quality_score", 0.0)
-        if ev <= 0 and not obvious_override:
+        if ev < -0.004 and not obvious_override:
             logger.info("Entry blocked market_id=%s reason=negative_ev ev=%.4f", candidate.get("market_id"), ev)
             rejected.append((candidate, "negative_ev"))
             continue
-        if execution_quality < 0.08 and not obvious_override:
+        if execution_quality < 0.05 and not obvious_override:
             logger.info("Entry blocked market_id=%s reason=execution_too_poor ev=%.4f execution=%.4f", candidate.get("market_id"), ev, execution_quality)
             rejected.append((candidate, "execution_too_poor"))
             continue
@@ -2836,8 +2859,8 @@ def select_portfolio(candidates, snapshot):
             candidate["analysis"].get("take_now_vs_watchlist") == "watchlist"
             and len(watchlist) < WATCHLIST_LIMIT
             and not obvious_override
-            and ev < 0.01
-            and validation < 0.30
+            and ev < 0.002
+            and validation < 0.22
         ):
             candidate["selection_bucket"] = "watchlist_high_potential"
             watchlist.append(candidate)
@@ -2854,7 +2877,7 @@ def select_portfolio(candidates, snapshot):
             entry_class = candidate["entry_class"] = "sniper"
             entry_mode = candidate["entry_mode"] = "sniper"
             tier = candidate["tier"]
-        elif trade_class == "secondary" and cycle_exploratory < desired_exploratory and candidate.get("market_learnability_score", 0.0) >= 0.58 and candidate.get("reliability_score", 0.0) <= 0.40:
+        elif trade_class == "secondary" and cycle_exploratory < desired_exploratory and candidate.get("market_learnability_score", 0.0) >= 0.50 and candidate.get("reliability_score", 0.0) <= 0.42:
             trade_class = candidate["trade_class"] = "experimental"
             entry_class = candidate["entry_class"] = "exploratory"
             entry_mode = candidate["entry_mode"] = "collector"
@@ -2873,7 +2896,7 @@ def select_portfolio(candidates, snapshot):
             else:
                 rejected.append((candidate, "secondary_cycle_limit"))
             continue
-        if trade_class == "experimental" and cycle_exploratory >= MAX_EXPLORATORY_POSITIONS_PER_CYCLE and not obvious_override:
+        if trade_class == "experimental" and cycle_exploratory >= MAX_EXPLORATORY_POSITIONS_PER_CYCLE + 4 and not obvious_override:
             rejected.append((candidate, "exploratory_cycle_limit"))
             continue
         allowed, reason = can_allocate(candidate, snapshot)
@@ -3097,6 +3120,7 @@ def run_bot_cycle(cycle_id=None):
     all_bets = get_current_lab_bets()
     open_bets = get_open_bets(all_bets)
     now_utc = datetime.now(timezone.utc)
+    reddit_cache = {}
     candidates = []
     seen_by_category = Counter()
     accepted_by_category = Counter()
@@ -3114,7 +3138,7 @@ def run_bot_cycle(cycle_id=None):
             if any(question == bet.get("question", "") for bet in open_bets):
                 skipped_open_duplicates += 1
                 continue
-            packet = build_research_packet(market, market_prob, markets, all_bets)
+            packet = build_research_packet(market, market_prob, markets, all_bets, reddit_cache=reddit_cache)
             accepted_by_category[packet.get("category", "general")] += 1
             prefilter_score = clamp(packet["source_quality_score"] * 0.22 + packet["final_evidence_strength"] * 0.18 + packet["mispricing_score"] * 0.28 + packet["learning_velocity_score"] * 0.18 + packet["market_learnability_score"] * 0.10 + (packet["volume"] / 50000.0) * 0.12 - packet["uncertainty_score"] * 0.18, 0.0, 1.0)
             candidates.append({"question": question, "market_id": market.get("id", ""), "market": market, "packet": packet, "prefilter_score": round(prefilter_score, 4)})
@@ -3212,12 +3236,15 @@ def run_bot_cycle(cycle_id=None):
         {
             "question": candidate["question"],
             "trade_class": candidate["trade_class"],
+            "entry_class": candidate.get("entry_class"),
             "tier": candidate.get("tier"),
             "horizon_bucket": candidate.get("horizon_bucket"),
             "obvious_trade_override": candidate.get("obvious_trade_override", False),
             "obvious_trade_reasons": candidate.get("obvious_trade_reasons", []),
             "amount": candidate.get("amount", 0),
             "edge": round(candidate["edge"], 4),
+            "expected_value": candidate.get("expected_value", 0.0),
+            "execution_quality_score": candidate.get("execution_quality_score", 0.0),
             "compound_score": candidate["compound_score"],
             "opportunity_score": candidate["opportunity_score"],
             "portfolio_priority_score": candidate["portfolio_priority_score"],
@@ -3231,10 +3258,13 @@ def run_bot_cycle(cycle_id=None):
         {
             "question": candidate["question"],
             "trade_class": candidate["trade_class"],
+            "entry_class": candidate.get("entry_class"),
             "tier": candidate.get("tier"),
             "horizon_bucket": candidate.get("horizon_bucket"),
             "obvious_trade_override": candidate.get("obvious_trade_override", False),
             "edge": round(candidate.get("edge", 0.0), 4),
+            "expected_value": candidate.get("expected_value", 0.0),
+            "execution_quality_score": candidate.get("execution_quality_score", 0.0),
             "portfolio_priority_score": candidate.get("portfolio_priority_score"),
             "opportunity_score": candidate.get("opportunity_score"),
             "reliability": candidate.get("conclusion_reliability_score"),
@@ -3251,13 +3281,20 @@ def run_bot_cycle(cycle_id=None):
             "question": candidate["question"],
             "reason": reason,
             "trade_class": candidate.get("trade_class"),
+            "entry_class": candidate.get("entry_class"),
             "tier": candidate.get("tier"),
             "horizon_bucket": candidate.get("horizon_bucket"),
             "obvious_trade_override": candidate.get("obvious_trade_override", False),
             "edge": round(candidate.get("edge", 0.0), 4),
+            "expected_value": candidate.get("expected_value", 0.0),
+            "expected_value_score": candidate.get("expected_value_score", 0.0),
+            "execution_quality_score": candidate.get("execution_quality_score", 0.0),
+            "reliability_score": candidate.get("reliability_score", candidate.get("conclusion_reliability_score")),
+            "mispricing_type": candidate.get("mispricing_type"),
             "score": candidate.get("portfolio_priority_score", candidate.get("compound_score")),
             "reliability": candidate.get("conclusion_reliability_score"),
             "relative_rank_score": candidate.get("relative_rank_score", 0.0),
+            "duplicate_reason_detail": candidate.get("duplicate_reason_detail"),
         }
         for candidate, reason in rejected[:40]
     ]
