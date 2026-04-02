@@ -1073,6 +1073,7 @@ def build_cycle_summary(analyzed_count, shortlist_count, selected, watchlist, re
             "negative_ev": "el valor esperado no era positivo",
             "execution_too_poor": "entrar salía demasiado caro",
             "ambiguous_market": "el mercado era ambiguo",
+            "size_too_small": "solo valían una apuesta demasiado chica",
         }.get(top_reason, "todavía no era momento de apostar")
         headline = f"Revisó {analyzed_count} mercados. Encontró {len(watchlist)} oportunidades, pero no hizo apuestas porque {readable_reason}."
     elif shortlist_count:
@@ -1085,6 +1086,7 @@ def build_cycle_summary(analyzed_count, shortlist_count, selected, watchlist, re
             "negative_ev": "el valor esperado no era positivo",
             "execution_too_poor": "la ejecución era mala",
             "ambiguous_market": "el mercado no era claro",
+            "size_too_small": "solo valían una apuesta demasiado chica",
         }.get(top_reason, "faltó una oportunidad clara")
         headline = f"Revisó {analyzed_count} mercados. {shortlist_count} quedaron preseleccionadas, pero no hizo apuestas porque {readable_reason}."
     else:
@@ -1490,6 +1492,8 @@ def detect_mispricing(packet, market_data=None):
         raw_edge_estimate *= 0.92
     elif category in ("weird_impossible", "product_launches", "celebrities"):
         raw_edge_estimate *= 1.08
+    if packet.get("resolution_type") in ("deadline", "binary", "election", "legal", "launch"):
+        raw_edge_estimate *= 1.06
     if days_left <= FAST_FEEDBACK_DAYS:
         raw_edge_estimate *= 1.04
     if current_price != market_prob:
@@ -1501,6 +1505,8 @@ def detect_mispricing(packet, market_data=None):
         + micro_dislocation * 0.75
         + (0.12 if mispricing_type == "DEADLINE_MISPRICING" else 0.0)
         + (0.10 if mispricing_type == "EXTREME_PRICE_ERROR" else 0.0)
+        + (0.08 if packet.get("resolution_type") in ("deadline", "binary", "election", "legal", "launch") else 0.0)
+        + (0.06 if days_left <= 30 else 0.0)
         - packet.get("uncertainty_score", 0.0) * 0.22,
         0.0,
         1.0,
@@ -2811,7 +2817,7 @@ def size_bet(candidate, snapshot):
         usable_cash = min(snapshot["free_balance"], usable_cash + snapshot["fast_feedback_budget"] * 0.28)
     if horizon_bucket == "long" and trade_class != "core" and not candidate.get("obvious_trade_override"):
         usable_cash *= 0.82
-    amount = round(max(12.0 if trade_class == "experimental" else 20.0 if trade_class == "secondary" else 34.0, usable_cash * final_fraction), 2)
+    amount = round(max(8.0 if trade_class == "experimental" else 18.0 if trade_class == "secondary" else 34.0, usable_cash * final_fraction), 2)
     amount = min(amount, snapshot["free_balance"] * (0.22 if trade_class == "core" else 0.11 if trade_class == "secondary" else 0.05))
     return amount, round(kelly_core * 0.25, 4)
 
@@ -2826,7 +2832,7 @@ def select_portfolio(candidates, snapshot):
     cycle_category_counts = Counter()
     cycle_thesis_counts = Counter()
     desired_core = min(MAX_CORE_POSITIONS_PER_CYCLE, max(MIN_CORE_PER_CYCLE_IF_AVAILABLE, round(MAX_POSITIONS_PER_CYCLE * 0.22)))
-    desired_exploratory = min(MAX_EXPLORATORY_POSITIONS_PER_CYCLE, max(MIN_EXPLORATORY_PER_CYCLE_IF_AVAILABLE, round(MAX_POSITIONS_PER_CYCLE * 0.25)))
+    desired_exploratory = min(MAX_EXPLORATORY_POSITIONS_PER_CYCLE + 4, max(MIN_EXPLORATORY_PER_CYCLE_IF_AVAILABLE + 2, round(MAX_POSITIONS_PER_CYCLE * 0.33)))
     for candidate in sorted(candidates, key=lambda item: (item.get("portfolio_priority_score", 0.0), item["compound_score"]), reverse=True):
         trade_class = candidate["trade_class"]
         entry_class = candidate.get("entry_class", "standard")
@@ -2867,7 +2873,7 @@ def select_portfolio(candidates, snapshot):
             continue
         same_category_count = cycle_category_counts[candidate["packet"]["category"]]
         same_thesis_count = cycle_thesis_counts[candidate["thesis_type"]]
-        if same_category_count >= 3 and same_thesis_count >= 2 and not obvious_override:
+        if same_category_count >= 4 and same_thesis_count >= 3 and ev < 0.018 and not obvious_override:
             candidate["selection_bucket"] = "watchlist_high_potential"
             watchlist.append(candidate)
             continue
@@ -2883,20 +2889,20 @@ def select_portfolio(candidates, snapshot):
             entry_mode = candidate["entry_mode"] = "collector"
             candidate["tier"] = "TIER_C"
             tier = "TIER_C"
-        if len(selected) >= MAX_POSITIONS_PER_CYCLE and not obvious_override:
+        if len(selected) >= MAX_POSITIONS_PER_CYCLE + 6 and not obvious_override:
             rejected.append((candidate, "cycle_limit"))
             continue
         if trade_class == "core" and cycle_core >= MAX_CORE_POSITIONS_PER_CYCLE and not obvious_override:
             rejected.append((candidate, "core_cycle_limit"))
             continue
-        if trade_class == "secondary" and cycle_secondary >= MAX_SECONDARY_POSITIONS_PER_CYCLE and not obvious_override:
+        if trade_class == "secondary" and cycle_secondary >= MAX_SECONDARY_POSITIONS_PER_CYCLE + 3 and not obvious_override:
             if len(watchlist) < WATCHLIST_LIMIT:
                 candidate["selection_bucket"] = "watchlist_high_potential"
                 watchlist.append(candidate)
             else:
                 rejected.append((candidate, "secondary_cycle_limit"))
             continue
-        if trade_class == "experimental" and cycle_exploratory >= MAX_EXPLORATORY_POSITIONS_PER_CYCLE + 4 and not obvious_override:
+        if trade_class == "experimental" and cycle_exploratory >= MAX_EXPLORATORY_POSITIONS_PER_CYCLE + 8 and not obvious_override:
             rejected.append((candidate, "exploratory_cycle_limit"))
             continue
         allowed, reason = can_allocate(candidate, snapshot)
@@ -2908,7 +2914,7 @@ def select_portfolio(candidates, snapshot):
                 rejected.append((candidate, reason))
             continue
         amount, kelly_f = size_bet(candidate, snapshot)
-        if amount < 5:
+        if amount < 3:
             rejected.append((candidate, "size_too_small"))
             continue
         candidate["amount"] = amount
