@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg2
 import requests
-from flask import Flask, jsonify, render_template_string, request, url_for
+from flask import Flask, jsonify, render_template_string, request
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
@@ -3368,14 +3368,22 @@ HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700;800;900&display=swap');
 :root{--bg:#050705;--bg2:#0c100d;--panel:#111411;--panel-soft:#171c18;--line:#29412d;--line-2:#4b3566;--text:#eef5ee;--muted:#b2beb2;--soft:#d6dfd6;--accent:#8cff64;--accent-2:#9e5cff;--accent-3:#65d7c8;--warn:#e7d36d;--danger:#ff7d89;--shadow-hard:0 0 0 1px rgba(0,0,0,.72),0 10px 24px rgba(0,0,0,.45);--glow-green:0 0 10px rgba(140,255,100,.15);--glow-violet:0 0 10px rgba(158,92,255,.12)}
 *{box-sizing:border-box}
 body{margin:0;color:var(--text);font-family:"Segoe UI",Tahoma,Arial,sans-serif;background-color:var(--bg);background-image:linear-gradient(rgba(120,255,120,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(120,255,120,.02) 1px,transparent 1px),linear-gradient(180deg,rgba(255,255,255,.025) 0%,rgba(255,255,255,0) 8%,rgba(0,0,0,0) 92%,rgba(255,255,255,.02) 100%),radial-gradient(circle at top,rgba(158,92,255,.08),transparent 24%);background-size:28px 28px,28px 28px,100% 100%,100% 100%}
 body:before{content:"";position:fixed;inset:0;pointer-events:none;background:repeating-linear-gradient(180deg,rgba(255,255,255,.015) 0px,rgba(255,255,255,.015) 1px,transparent 2px,transparent 4px);mix-blend-mode:screen;opacity:.18}
 .app-shell{max-width:1360px;margin:0 auto;padding:28px 20px 42px}
 .topbar{display:flex;justify-content:space-between;gap:28px;align-items:flex-start;margin-bottom:24px}
-.logo-lockup{display:flex;align-items:flex-start}
-.logo-image{display:block;width:min(560px,42vw);min-width:260px;height:auto;object-fit:contain;filter:drop-shadow(0 0 18px rgba(101,215,200,.12))}
+.title-block{min-width:0}
+.logo-lockup{display:flex;align-items:flex-start;position:relative;padding:2px 0 4px}
+.logo-mark{position:relative;display:inline-flex;flex-direction:column;gap:2px;line-height:.88;text-transform:uppercase}
+.logo-top,.logo-bottom{position:relative;display:block;font-family:'Orbitron',Impact,Haettenschweiler,'Arial Narrow Bold',sans-serif;font-style:italic;font-weight:900;letter-spacing:.05em;color:#edf5f2}
+.logo-top{font-size:clamp(34px,4.6vw,64px);text-shadow:-2px 0 0 var(--accent-2),2px 0 0 var(--accent-3),0 0 10px rgba(101,215,200,.18)}
+.logo-bottom{font-size:clamp(28px,3.4vw,50px);padding-left:clamp(88px,9vw,132px);color:#fff38a;text-shadow:-2px 0 0 #ff6a3d,2px 0 0 #ffc06d,0 0 10px rgba(255,106,61,.18)}
+.logo-top:before,.logo-bottom:before{content:attr(data-text);position:absolute;left:2px;top:2px;z-index:-1;color:transparent;-webkit-text-stroke:1px rgba(8,10,12,.9)}
+.logo-top:after,.logo-bottom:after{content:"";position:absolute;left:-18px;right:-8px;bottom:-8px;height:2px;background:linear-gradient(90deg,rgba(101,215,200,.65),rgba(158,92,255,.55),transparent 88%);clip-path:polygon(0 0,96% 0,100% 100%,2% 100%);opacity:.85}
+.logo-bottom:after{left:0;right:-28px;background:linear-gradient(90deg,rgba(255,106,61,.8),rgba(255,192,109,.65),transparent 86%)}
 .pill-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
 .pill{padding:8px 13px;border-radius:2px;border:1px solid rgba(140,255,100,.22);background:rgba(14,19,14,.95);box-shadow:inset 0 0 0 1px rgba(255,255,255,.04);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text);font-family:Consolas,"Lucida Console","Courier New",monospace}
 .actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
@@ -3438,7 +3446,7 @@ details:first-of-type{border-top:none;padding-top:0}
 summary{cursor:pointer;font-weight:700;color:#eef5ee;text-transform:uppercase;letter-spacing:.1em;font-family:Consolas,"Lucida Console","Courier New",monospace}
 .summary-copy{margin-top:10px;font-size:13px;color:var(--text);line-height:1.7}
 @media(max-width:1180px){.top-priority,.mid-grid,.bottom-grid,.hero,.split{grid-template-columns:1fr}.top-stat-grid,.stat-grid{grid-template-columns:repeat(2,1fr)}.cycle-grid{grid-template-columns:repeat(3,1fr)}}
-@media(max-width:760px){.app-shell{padding:18px 14px 28px}.topbar{flex-direction:column}.actions{justify-content:flex-start}.logo-image{width:min(92vw,430px);min-width:0}.top-stat-grid,.stat-grid,.cycle-grid,.trade-grid,.split{grid-template-columns:1fr}}
+@media(max-width:760px){.app-shell{padding:18px 14px 28px}.topbar{flex-direction:column}.actions{justify-content:flex-start}.logo-top{font-size:clamp(28px,9vw,42px)}.logo-bottom{font-size:clamp(24px,7.5vw,36px);padding-left:58px}.top-stat-grid,.stat-grid,.cycle-grid,.trade-grid,.split{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -3446,7 +3454,10 @@ summary{cursor:pointer;font-weight:700;color:#eef5ee;text-transform:uppercase;le
   <div class="topbar">
     <div class="title-block">
       <div class="logo-lockup" aria-label="Polymarket Bot 404">
-        <img class="logo-image" src="{{ logo_url }}" alt="Polymarket Bot 404">
+        <div class="logo-mark">
+          <span class="logo-top" data-text="Polymarket">Polymarket</span>
+          <span class="logo-bottom" data-text="404">404</span>
+        </div>
       </div>
       <div class="pill-row">
         <div class="pill" id="lab-pill">Lab activo: —</div>
@@ -3660,7 +3671,7 @@ loadAll();setInterval(loadAll,12000)
 
 @app.route("/")
 def index():
-    return render_template_string(HTML, logo_url=url_for("static", filename="polymarket-404.png"))
+    return render_template_string(HTML)
 
 
 @app.before_request
