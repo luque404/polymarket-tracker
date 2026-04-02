@@ -746,18 +746,18 @@ def build_runner_status():
         })
     last_error = get_state_text("last_cycle_error", "")
     if not runner_enabled:
-        summary = "Runner detenido."
+        summary = "Bot detenido."
     elif health == "healthy" and last_success:
-        summary = f"Runner saludable. Último ciclo exitoso hace {format_age_seconds((now - last_success).total_seconds())}."
+        summary = f"Bot funcionando. Último análisis hace {format_age_seconds((now - last_success).total_seconds())}."
     elif health == "delayed" and last_started:
-        summary = f"Runner demorado. Último ciclo hace {format_age_seconds((now - last_started).total_seconds())}."
+        summary = f"Bot lento. Último análisis hace {format_age_seconds((now - last_started).total_seconds())}."
     else:
         reference = last_started or last_success
-        summary = f"Runner stale. No hubo ciclos recientes." if not reference else f"Runner stale. No hubo ciclos hace {format_age_seconds((now - reference).total_seconds())}."
+        summary = f"Bot frenado. No hubo análisis recientes." if not reference else f"Bot frenado. No hubo análisis hace {format_age_seconds((now - reference).total_seconds())}."
     if last_error and get_state_text("last_cycle_status", "") == "error":
-        summary = f"{summary} Último ciclo falló: {last_error[:160]}"
+        summary = f"{summary} El último análisis falló: {last_error[:160]}"
     elif zero_entry_streak >= 3:
-        summary = f"{summary} El runner está activo pero no encontró entradas en los últimos {zero_entry_streak} ciclos."
+        summary = f"{summary} El bot está funcionando, pero no encontró apuestas en los últimos {zero_entry_streak} análisis."
     return {
         "runner_enabled": runner_enabled,
         "runner_autonomous": RUNNER_AUTONOMOUS,
@@ -944,17 +944,27 @@ def build_cycle_summary(analyzed_count, shortlist_count, selected, watchlist, re
     reason_counts = Counter(reason for _, reason in rejected)
     top_blockers = dict(reason_counts.most_common(6))
     if selected:
-        headline = f"Se agregaron {len(selected)} trades: {core_count} core, {secondary_count} secondary y {exploratory_count} exploratory."
+        headline = f"Se hicieron {len(selected)} apuestas: {core_count} fuertes, {secondary_count} buenas y {exploratory_count} de exploración."
     elif watchlist:
-        top_reason = next(iter(top_blockers), "prioridad insuficiente")
-        headline = f"Analizó {analyzed_count} mercados. Encontró {len(watchlist)} oportunidades en watchlist, pero no hubo entradas por {top_reason}."
+        top_reason = next(iter(top_blockers), "no eran lo suficientemente buenas")
+        readable_reason = {
+            "duplicate_semantic_overlap": "eran muy parecidas a otras apuestas",
+            "tier_skip": "no eran lo suficientemente buenas",
+            "low_reliability": "había poca confianza",
+            "low_score": "no parecían una buena apuesta",
+        }.get(top_reason, "todavía no era momento de apostar")
+        headline = f"Revisó {analyzed_count} mercados. Encontró {len(watchlist)} oportunidades, pero no hizo apuestas porque {readable_reason}."
     elif shortlist_count:
-        top_reason = next(iter(top_blockers), "falta de edge claro")
-        headline = f"Analizó {analyzed_count} mercados. {shortlist_count} pasaron el filtro inicial, pero ninguno alcanzó prioridad suficiente para entrar."
-        if top_reason not in ("low_score",):
-            headline = f"{headline[:-1]} Motivo principal: {top_reason}."
+        top_reason = next(iter(top_blockers), "faltó una oportunidad clara")
+        readable_reason = {
+            "duplicate_semantic_overlap": "muy parecidas a otras apuestas",
+            "tier_skip": "no eran lo suficientemente buenas",
+            "low_reliability": "había poca confianza",
+            "low_score": "faltó una oportunidad clara",
+        }.get(top_reason, "faltó una oportunidad clara")
+        headline = f"Revisó {analyzed_count} mercados. {shortlist_count} quedaron preseleccionadas, pero no hizo apuestas porque {readable_reason}."
     else:
-        headline = f"Analizó {analyzed_count} mercados y no encontró candidatos suficientemente fuertes para pasar el filtro inicial."
+        headline = f"Revisó {analyzed_count} mercados y no encontró oportunidades lo suficientemente buenas."
     return {
         "headline": headline,
         "analyzed": analyzed_count,
@@ -3354,75 +3364,82 @@ def start_background_loops():
 HTML = """<!DOCTYPE html>
 <html>
 <head>
-<title>Polymarket v2</title>
+<title>Polymarket Bot 404</title>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-:root{--bg:#05060b;--bg2:#0b0f17;--panel:#101423;--panel-soft:#151a2d;--line:#2a3150;--text:#eef2ff;--muted:#93a0bf;--soft:#c8d0e9;--accent:#73ffbc;--accent-2:#b27cff;--accent-3:#86a8ff;--warn:#ffd66e;--danger:#ff8ea7;--glow-violet:0 0 26px rgba(178,124,255,.18);--glow-green:0 0 24px rgba(115,255,188,.14)}
+:root{--bg:#050705;--bg2:#0c100d;--panel:#111411;--panel-soft:#171c18;--line:#29412d;--line-2:#4b3566;--text:#d7e0d3;--muted:#839484;--soft:#a9b7a9;--accent:#8cff64;--accent-2:#9e5cff;--accent-3:#65d7c8;--warn:#e7d36d;--danger:#ff7d89;--shadow-hard:0 0 0 1px rgba(0,0,0,.72),0 10px 24px rgba(0,0,0,.45);--glow-green:0 0 10px rgba(140,255,100,.15);--glow-violet:0 0 10px rgba(158,92,255,.12)}
 *{box-sizing:border-box}
-body{margin:0;background:linear-gradient(rgba(134,168,255,.04) 1px, transparent 1px),linear-gradient(90deg, rgba(134,168,255,.04) 1px, transparent 1px),radial-gradient(circle at 16% 0%, rgba(178,124,255,.18), transparent 30%),radial-gradient(circle at 84% 8%, rgba(115,255,188,.12), transparent 24%),linear-gradient(180deg,var(--bg),var(--bg2));background-size:34px 34px,34px 34px,auto,auto,auto;color:var(--text);font-family:Segoe UI,system-ui,sans-serif}
+body{margin:0;color:var(--text);font-family:Consolas,"Lucida Console","Courier New",monospace;background-color:var(--bg);background-image:linear-gradient(rgba(120,255,120,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(120,255,120,.02) 1px,transparent 1px),linear-gradient(180deg,rgba(255,255,255,.025) 0%,rgba(255,255,255,0) 8%,rgba(0,0,0,0) 92%,rgba(255,255,255,.02) 100%),radial-gradient(circle at top,rgba(158,92,255,.08),transparent 24%);background-size:28px 28px,28px 28px,100% 100%,100% 100%}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;background:repeating-linear-gradient(180deg,rgba(255,255,255,.015) 0px,rgba(255,255,255,.015) 1px,transparent 2px,transparent 4px);mix-blend-mode:screen;opacity:.18}
 .app-shell{max-width:1360px;margin:0 auto;padding:28px 20px 42px}
 .topbar{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:20px}
-.title-block h1{margin:0;font-size:42px;letter-spacing:.18em;text-transform:uppercase;font-weight:900;background:linear-gradient(135deg,#faf7ff 0%,#b27cff 45%,#73ffbc 100%);-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:var(--glow-violet)}
-.pill-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
-.pill{padding:8px 12px;border-radius:999px;border:1px solid rgba(178,124,255,.16);background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.01));font-size:12px;color:var(--soft)}
+.logo-lockup{position:relative;display:inline-block;padding:6px 0 0}
+.logo-main{margin:0;font-size:56px;line-height:.9;font-weight:900;text-transform:uppercase;letter-spacing:.02em;font-family:Impact,Haettenschweiler,"Arial Narrow Bold",sans-serif;color:#f3e52d;transform:skewX(-18deg);text-shadow:3px 0 0 #0c1110,6px 0 0 var(--accent-3),0 0 9px rgba(243,229,45,.1)}
+.logo-main .cut{display:inline-block;position:relative;padding-right:12px}
+.logo-main .cut:after{content:"";position:absolute;right:0;top:8px;width:8px;height:70%;background:var(--bg);transform:skewX(24deg)}
+.logo-sub{margin-top:2px;padding-left:10px;font-size:18px;letter-spacing:.62em;text-transform:uppercase;color:var(--accent-3);text-shadow:0 0 8px rgba(101,215,200,.16)}
+.logo-frame{margin-top:12px;height:8px;max-width:560px;clip-path:polygon(0 0,95% 0,100% 100%,7% 100%);background:linear-gradient(90deg,var(--accent),var(--accent-2) 74%,transparent 74%);opacity:.7}
+.pill-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+.pill{padding:7px 12px;border-radius:2px;border:1px solid rgba(140,255,100,.2);background:rgba(14,19,14,.92);box-shadow:inset 0 0 0 1px rgba(255,255,255,.03);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--soft)}
 .actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
-.btn{padding:10px 14px;border-radius:12px;border:1px solid rgba(178,124,255,.16);background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.012));color:var(--text);cursor:pointer;font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:11px}
-.btn:hover{transform:translateY(-1px);box-shadow:var(--glow-violet)}
-.btn-primary{background:linear-gradient(135deg,#73ffbc,#6fd8ff);color:#05120d;border-color:transparent}
-.btn-secondary{background:linear-gradient(135deg,#b27cff,#88a8ff);color:#0a0c17;border-color:transparent}
-.btn-danger{background:linear-gradient(135deg,#ff8ea7,#ff7688);color:#25070d;border-color:transparent}
+.btn{padding:11px 14px;border-radius:2px;border:1px solid rgba(140,255,100,.22);background:#121712;color:var(--text);cursor:pointer;font-weight:700;text-transform:uppercase;letter-spacing:.14em;font-size:11px;box-shadow:var(--shadow-hard);clip-path:polygon(0 0,94% 0,100% 100%,6% 100%)}
+.btn:hover{background:#172018;color:#f0fff0;box-shadow:0 0 0 1px rgba(140,255,100,.18),0 0 12px rgba(140,255,100,.08)}
+.btn-primary{background:#1b2418;color:#f3ff7a;border-color:rgba(243,229,45,.35)}
+.btn-secondary{background:#16131f;color:#d4b7ff;border-color:rgba(158,92,255,.32)}
+.btn-danger{background:#211216;color:#ffc1c7;border-color:rgba(255,125,137,.32)}
 .dashboard{display:flex;flex-direction:column;gap:18px}
 .column{display:flex;flex-direction:column;gap:18px}
 .top-priority,.mid-grid,.bottom-grid{display:grid;gap:18px}
 .top-priority{grid-template-columns:1.45fr .95fr}
 .mid-grid{grid-template-columns:1.1fr .9fr}
 .bottom-grid{grid-template-columns:1fr 1fr}
-.panel{background:linear-gradient(180deg,rgba(16,20,35,.98),rgba(11,14,24,.98));border:1px solid rgba(178,124,255,.12);border-radius:22px;padding:18px;box-shadow:0 16px 36px rgba(0,0,0,.24)}
+.panel{position:relative;background:linear-gradient(180deg,rgba(18,22,18,.98),rgba(10,13,10,.98));border:1px solid rgba(91,120,91,.36);border-radius:2px;padding:18px;box-shadow:var(--shadow-hard);overflow:hidden}
+.panel:before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(90deg,transparent 0,rgba(140,255,100,.03) 46%,rgba(158,92,255,.03) 54%,transparent 100%);opacity:.4}
 .hero{display:grid;grid-template-columns:1.3fr .9fr;gap:16px}
-.hero-card,.stat,.mini-stat,.trade-card,.watch-card{background:linear-gradient(180deg,rgba(21,26,45,.96),rgba(16,20,34,.96));border:1px solid rgba(178,124,255,.10);border-radius:18px}
+.hero-card,.stat,.mini-stat,.trade-card,.watch-card{position:relative;background:linear-gradient(180deg,rgba(22,27,22,.96),rgba(12,15,12,.96));border:1px solid rgba(83,113,83,.34);border-radius:2px;clip-path:polygon(0 0,98% 0,100% 14px,100% 100%,2% 100%,0 calc(100% - 14px))}
 .hero-card{padding:20px}
-.eyebrow,.section-kicker{font-size:11px;text-transform:uppercase;letter-spacing:.17em;color:#91a0c7}
-.hero-value{font-size:34px;letter-spacing:-.05em;margin-top:10px}
+.eyebrow,.section-kicker{font-size:11px;text-transform:uppercase;letter-spacing:.2em;color:#7fa281}
+.hero-value{font-size:34px;letter-spacing:-.05em;margin-top:10px;font-family:Impact,Haettenschweiler,"Arial Narrow Bold",sans-serif;text-transform:uppercase}
 .hero-copy{margin-top:10px;color:var(--soft);font-size:14px;line-height:1.55}
-.status-strip{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-top:16px;padding-top:14px;border-top:1px solid rgba(255,255,255,.06)}
-.status-badge,.badge{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid rgba(178,124,255,.14);background:#171d31;color:#d6def4}
-.status-badge{padding:8px 12px;color:var(--accent);background:rgba(115,255,188,.08);border-color:rgba(115,255,188,.18);box-shadow:var(--glow-green)}
+.status-strip{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-top:16px;padding-top:14px;border-top:1px solid rgba(140,255,100,.12)}
+.status-badge,.badge{display:inline-flex;align-items:center;padding:5px 9px;border-radius:2px;font-size:11px;font-weight:700;border:1px solid rgba(140,255,100,.16);background:#141914;color:#c8d4c8;text-transform:uppercase;letter-spacing:.08em}
+.status-badge{padding:8px 12px;color:var(--accent);background:rgba(140,255,100,.06);border-color:rgba(140,255,100,.26);box-shadow:var(--glow-green)}
 .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 .top-stat-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
 .stat{padding:16px}
 .top-stat{padding:18px;min-height:132px}
-.stat-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}
-.stat-value{margin-top:9px;font-size:28px;letter-spacing:-.04em}
+.stat-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.15em}
+.stat-value{margin-top:9px;font-size:28px;letter-spacing:-.04em;font-family:Impact,Haettenschweiler,"Arial Narrow Bold",sans-serif}
 .stat-note{margin-top:8px;color:var(--muted);font-size:12px;line-height:1.35}
 .positive{color:var(--accent)}.negative{color:var(--danger)}.neutral{color:var(--soft)}
-.section-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:14px}
-.section-title{font-size:18px;font-weight:700;letter-spacing:-.02em}
+.section-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid rgba(140,255,100,.1)}
+.section-title{font-size:18px;font-weight:700;letter-spacing:.02em;text-transform:uppercase}
 .section-sub{margin-top:4px;color:var(--muted);font-size:12px}
 .cycle-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:14px}
 .mini-stat{padding:14px}
-.mini-stat strong{display:block;font-size:22px;margin-top:6px}
-.message-card{padding:16px;border-radius:16px;background:rgba(135,231,192,.08);border:1px solid rgba(135,231,192,.14);color:#e4faf1;line-height:1.6}
+.mini-stat strong{display:block;font-size:22px;margin-top:6px;font-family:Impact,Haettenschweiler,"Arial Narrow Bold",sans-serif}
+.message-card{padding:16px;border-radius:2px;background:rgba(140,255,100,.06);border:1px solid rgba(140,255,100,.18);color:#e4faf1;line-height:1.6}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
 .list{display:grid;gap:12px}
 .compact-list{display:grid;gap:10px}
 .trade-card,.watch-card{padding:16px}
 .trade-top,.watch-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
-.trade-q,.watch-q{font-size:15px;font-weight:700;line-height:1.45}
+.trade-q,.watch-q{font-size:15px;font-weight:700;line-height:1.45;text-transform:uppercase}
 .badge-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-.core{background:rgba(115,255,188,.12);color:#97ffd0}.secondary{background:rgba(178,124,255,.14);color:#d2b5ff}.experimental{background:rgba(134,168,255,.14);color:#bdd0ff}
+.core{background:rgba(140,255,100,.12);color:#d5ff9d}.secondary{background:rgba(158,92,255,.12);color:#d7bcff}.experimental{background:rgba(101,215,200,.12);color:#b9fff1}
 .trade-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
-.meta-box{padding:10px 12px;border-radius:14px;background:#0d1322;border:1px solid rgba(178,124,255,.08)}
-.meta-box span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.11em;margin-bottom:6px}
+.meta-box{padding:10px 12px;border-radius:2px;background:#0d110d;border:1px solid rgba(83,113,83,.26)}
+.meta-box span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.13em;margin-bottom:6px}
 .meta-box strong{font-size:13px;color:var(--text);line-height:1.45}
-.trade-foot,.watch-foot{margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.05);font-size:13px;color:var(--soft);line-height:1.55}
+.trade-foot,.watch-foot{margin-top:12px;padding-top:12px;border-top:1px solid rgba(140,255,100,.08);font-size:13px;color:var(--soft);line-height:1.55}
 .reason-list,.metric-list{display:grid;gap:8px}
-.reason-item,.metric-item{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px;color:var(--soft)}
+.reason-item,.metric-item{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid rgba(140,255,100,.08);font-size:13px;color:var(--soft)}
 .reason-item:last-child,.metric-item:last-child{border-bottom:none}
-.empty{padding:28px 18px;border-radius:18px;border:1px dashed rgba(178,124,255,.18);text-align:center;color:var(--muted);background:rgba(255,255,255,.02)}
-details{border-top:1px solid rgba(255,255,255,.06);padding-top:14px}
+.empty{padding:28px 18px;border-radius:2px;border:1px dashed rgba(140,255,100,.18);text-align:center;color:var(--muted);background:rgba(255,255,255,.02)}
+details{border-top:1px solid rgba(140,255,100,.08);padding-top:14px}
 details:first-of-type{border-top:none;padding-top:0}
-summary{cursor:pointer;font-weight:700;color:#dde5ff}
+summary{cursor:pointer;font-weight:700;color:#d8e6d8;text-transform:uppercase;letter-spacing:.1em}
 .summary-copy{margin-top:10px;font-size:13px;color:var(--soft);line-height:1.6}
 @media(max-width:1180px){.top-priority,.mid-grid,.bottom-grid,.hero,.split{grid-template-columns:1fr}.top-stat-grid,.stat-grid{grid-template-columns:repeat(2,1fr)}.cycle-grid{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:760px){.app-shell{padding:18px 14px 28px}.topbar{flex-direction:column}.actions{justify-content:flex-start}.top-stat-grid,.stat-grid,.cycle-grid,.trade-grid,.split{grid-template-columns:1fr}}
@@ -3432,20 +3449,24 @@ summary{cursor:pointer;font-weight:700;color:#dde5ff}
 <div class="app-shell">
   <div class="topbar">
     <div class="title-block">
-      <h1>Polymarket v2</h1>
+      <div class="logo-lockup" aria-label="Polymarket Bot 404">
+        <div class="logo-main"><span class="cut">Polymarket</span> Bot 404</div>
+        <div class="logo-sub">mercado negro predictivo</div>
+        <div class="logo-frame"></div>
+      </div>
       <div class="pill-row">
         <div class="pill" id="lab-pill">Lab activo: —</div>
-        <div class="pill" id="strategy-pill">Strategy: —</div>
-        <div class="pill" id="bankroll-pill">Bankroll inicial: —</div>
-        <div class="pill" id="legacy-pill">Legacy archivado: —</div>
+        <div class="pill" id="strategy-pill">Versión: —</div>
+        <div class="pill" id="bankroll-pill">Dinero inicial: —</div>
+        <div class="pill" id="legacy-pill">Historial viejo: —</div>
         <div class="pill" id="runner-pill">Bot: —</div>
       </div>
     </div>
     <div class="actions">
       <button class="btn" onclick="loadAll()">Actualizar</button>
-      <button class="btn" onclick="doMonitor()">Monitor</button>
-      <button class="btn btn-primary" onclick="runCycle()">Correr ciclo</button>
-      <button class="btn" onclick="restartRunner()">Reiniciar runner</button>
+      <button class="btn" onclick="doMonitor()">Revisar activas</button>
+      <button class="btn btn-primary" onclick="runCycle()">Hacer análisis</button>
+      <button class="btn" onclick="restartRunner()">Reiniciar bot</button>
       <button class="btn btn-secondary" onclick="fundPaper()">Fondear paper</button>
       <button class="btn btn-danger" onclick="resetLab()">Resetear lab</button>
     </div>
@@ -3460,8 +3481,8 @@ summary{cursor:pointer;font-weight:700;color:#dde5ff}
           <div class="hero-copy" id="bot-reasoning">Esperando datos del laboratorio actual.</div>
           <div class="status-strip">
             <div>
-              <div class="eyebrow">Último ciclo</div>
-              <div class="hero-copy" id="cycle-message">Todavía no hay resumen del último ciclo.</div>
+              <div class="eyebrow">Último análisis</div>
+              <div class="hero-copy" id="cycle-message">Todavía no hay resumen del último análisis.</div>
             </div>
             <div class="status-badge" id="live-tag">En espera</div>
           </div>
@@ -3474,11 +3495,11 @@ summary{cursor:pointer;font-weight:700;color:#dde5ff}
       </div>
 
       <div class="top-stat-grid">
-        <div class="stat top-stat"><div class="stat-label">Capital libre</div><div class="stat-value" id="capital-free">$0</div><div class="stat-note">Disponible ahora</div></div>
+        <div class="stat top-stat"><div class="stat-label">Dinero disponible</div><div class="stat-value" id="capital-free">$0</div><div class="stat-note">Disponible ahora</div></div>
         <div class="stat top-stat"><div class="stat-label">Apuestas activas</div><div class="stat-value" id="open-trades">0</div><div class="stat-note">Abiertas ahora</div></div>
         <div class="stat top-stat"><div class="stat-label">Último análisis</div><div class="stat-value" id="cycle-stats">0 / 0</div><div class="stat-note">Revisadas / Apuestas</div></div>
-        <div class="stat top-stat"><div class="stat-label">Capital comprometido</div><div class="stat-value" id="capital-committed">$0</div><div class="stat-note">En mercado</div></div>
-        <div class="stat top-stat"><div class="stat-label">Exposición</div><div class="stat-value" id="portfolio-exposure">0%</div><div class="stat-note">Uso de capital</div></div>
+        <div class="stat top-stat"><div class="stat-label">Dinero en uso</div><div class="stat-value" id="capital-committed">$0</div><div class="stat-note">En mercado</div></div>
+        <div class="stat top-stat"><div class="stat-label">Uso del dinero</div><div class="stat-value" id="portfolio-exposure">0%</div><div class="stat-note">Parte del capital usada</div></div>
       </div>
     </div>
 
@@ -3492,14 +3513,14 @@ summary{cursor:pointer;font-weight:700;color:#dde5ff}
           </div>
         </div>
         <div class="cycle-grid">
-          <div class="mini-stat"><div class="eyebrow">Analizados</div><strong id="cycle-analyzed">0</strong></div>
+          <div class="mini-stat"><div class="eyebrow">Revisadas</div><strong id="cycle-analyzed">0</strong></div>
           <div class="mini-stat"><div class="eyebrow">Preseleccionadas</div><strong id="cycle-shortlist">0</strong></div>
           <div class="mini-stat"><div class="eyebrow">Apuestas hechas</div><strong id="cycle-selected">0</strong></div>
           <div class="mini-stat"><div class="eyebrow">Oportunidades</div><strong id="cycle-watchlist">0</strong></div>
           <div class="mini-stat"><div class="eyebrow">Descartadas</div><strong id="cycle-rejected">0</strong></div>
         </div>
         <div class="panel" style="padding:14px;margin-top:14px">
-          <div class="section-kicker">Mix del ciclo</div>
+          <div class="section-kicker">Resumen del análisis</div>
           <div class="metric-list" id="cycle-mix"><div class="metric-item"><span>Sin datos</span><strong>—</strong></div></div>
         </div>
         <div class="panel" style="padding:14px;margin-top:14px">
@@ -3516,13 +3537,13 @@ summary{cursor:pointer;font-weight:700;color:#dde5ff}
             <div class="section-sub">Razones principales.</div>
           </div>
         </div>
-        <div class="reason-list" id="blockers"><div class="reason-item"><span>Sin bloqueos todavía</span><strong>—</strong></div></div>
+        <div class="reason-list" id="blockers"><div class="reason-item"><span>Sin motivos todavía</span><strong>—</strong></div></div>
         <div class="panel" style="padding:14px;margin-top:14px">
-          <div class="section-kicker">Mix activo</div>
+          <div class="section-kicker">Resumen actual</div>
           <div class="metric-list">
             <div class="metric-item"><span>Fuertes / Buenas / Exploración</span><strong id="core-exp">0 / 0 / 0</strong></div>
             <div class="metric-item"><span>Oportunidades</span><strong id="watchlist-count">0</strong></div>
-            <div class="metric-item"><span>PnL total</span><strong id="total-pnl">0</strong></div>
+            <div class="metric-item"><span>Ganancia total</span><strong id="total-pnl">0</strong></div>
           </div>
         </div>
       </div>
@@ -3549,11 +3570,11 @@ summary{cursor:pointer;font-weight:700;color:#dde5ff}
           </div>
         </div>
         <details open><summary>Bot</summary><div class="summary-copy" id="runner-summary">Cargando…</div></details>
-        <details open><summary>Performance</summary><div class="summary-copy" id="perf-summary">Cargando…</div></details>
-        <details><summary>Mix del portfolio</summary><div class="summary-copy" id="mix-summary">Cargando…</div></details>
+        <details open><summary>Resultados</summary><div class="summary-copy" id="perf-summary">Cargando…</div></details>
+        <details><summary>Reparto de apuestas</summary><div class="summary-copy" id="mix-summary">Cargando…</div></details>
         <details><summary>Aprendizaje</summary><div class="summary-copy" id="learning-summary">Cargando…</div></details>
         <details><summary>Patrones</summary><div class="summary-copy" id="pattern-summary">Cargando…</div></details>
-        <details><summary>Debug</summary><div class="summary-copy" id="debug-summary">Cargando…</div></details>
+        <details><summary>Detalle</summary><div class="summary-copy" id="debug-summary">Cargando…</div></details>
       </div>
     </div>
   </div>
@@ -3563,21 +3584,75 @@ function money(value){return '$'+Math.round(value||0).toLocaleString('en-US')}
 function pct(value){return Math.round((value||0)*100)+'%'}
 function metricClass(value){return value>0?'positive':value<0?'negative':'neutral'}
 function titleCase(value){return (value||'—').replaceAll('_',' ')}
+function humanLabel(value){
+  const raw=(value||'').toString()
+  const map={
+    healthy:'funcionando',
+    delayed:'lento',
+    stale:'frenado',
+    stopped:'detenido',
+    success:'bien',
+    error:'error',
+    skipped:'omitido',
+    never:'sin datos',
+    core:'fuertes',
+    secondary:'buenas',
+    experimental:'exploración',
+    exploratory:'exploración',
+    watchlist:'oportunidades',
+    shortlist:'preseleccionadas',
+    selected:'apuestas hechas',
+    rejected:'descartadas',
+    analyzed:'revisadas'
+  }
+  return map[raw]||titleCase(raw)
+}
+function humanReason(value){
+  const raw=(value||'').toString()
+  const map={
+    duplicate_semantic_overlap:'Demasiado parecida a otra apuesta',
+    duplicate_market_id:'Ya existe una apuesta igual',
+    duplicate_question:'Ya existe una apuesta igual',
+    tier_skip:'No era lo suficientemente buena',
+    low_reliability:'Poca confianza',
+    low_score:'No era lo suficientemente buena',
+    weak_edge_or_confidence:'La ventaja no era clara',
+    low_evidence:'Había poca información',
+    llm_skip:'No parecía una buena apuesta',
+    recently_evaluated:'Se revisó hace poco',
+    cycle_limit:'Ya había suficientes apuestas por ahora',
+    core_cycle_limit:'Ya había suficientes apuestas fuertes',
+    secondary_cycle_limit:'Ya había suficientes apuestas buenas',
+    exploratory_cycle_limit:'Ya había suficiente exploración',
+    max_open_positions:'Ya había demasiadas apuestas abiertas',
+    max_total_exposure:'Ya había demasiado dinero en uso',
+    max_category_exposure:'Ya había demasiado riesgo en ese tema',
+    max_side_exposure:'Ya había demasiado riesgo en esa dirección',
+    max_thesis_exposure:'Ya había demasiado riesgo parecido',
+    long_dated_budget_full:'Ya había demasiado dinero trabado por mucho tiempo',
+    size_too_small:'Era demasiado chica',
+    cycle_lock_busy:'El bot ya estaba trabajando',
+    market_quality:'No parecía un mercado confiable'
+  }
+  if(map[raw]) return map[raw]
+  if(raw.includes('_')) return titleCase(raw)
+  return raw||'—'
+}
 function bucketLabel(value){if(value==='experimental')return 'exploración';if(value==='secondary')return 'buena';if(value==='core')return 'fuerte';return titleCase(value)}
 function timeAgo(value){if(!value)return '—';const then=new Date(value);const diff=Math.max(0,Math.floor((Date.now()-then.getTime())/1000));if(diff<60)return `${diff}s`;const m=Math.floor(diff/60);if(m<60)return `${m}m`;const h=Math.floor(m/60);if(h<24)return `${h}h ${m%60}m`;const d=Math.floor(h/24);return `${d}d ${h%24}h`}
-function objectLines(obj, empty='—'){const entries=Object.entries(obj||{});if(!entries.length)return empty;return entries.map(([k,v])=>`${titleCase(k)}: ${typeof v==='object'?JSON.stringify(v):v}`).join('<br>')}
+function objectLines(obj, empty='—'){const entries=Object.entries(obj||{});if(!entries.length)return empty;return entries.map(([k,v])=>`${humanLabel(k)}: ${typeof v==='object'?JSON.stringify(v):v}`).join('<br>')}
 async function postJson(url,payload){const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});return res.json()}
 
 function setValue(id,text,raw){const el=document.getElementById(id);el.textContent=text;if(raw!==undefined){el.className=(el.className.includes('hero-value')?'hero-value ':'stat-value ')+metricClass(raw)}}
 
 function renderTradeCard(b){return `<div class='trade-card'><div class='trade-top'><div><div class='trade-q'>${b.question}</div><div class='badge-row'><span class='badge ${b.trade_class}'>${bucketLabel(b.trade_class)}</span><span class='badge'>${b.horizon_bucket||'—'}</span><span class='badge'>${b.category}</span>${b.obvious_trade_override?"<span class='badge'>clara</span>":""}</div></div><div class='badge'>${b.status_text}</div></div><div class='trade-grid'><div class='meta-box'><span>Apuesta</span><strong>${b.side} · ${money(b.amount)}</strong></div><div class='meta-box'><span>Resultado</span><strong class='${metricClass(b.pnl||0)}'>${b.pnl_text}</strong></div><div class='meta-box'><span>Entrada / Ahora</span><strong>${b.price_entry||0} / ${b.price_current||0}</strong></div><div class='meta-box'><span>Ventaja / Confianza</span><strong>${b.edge}pp · ${b.confidence}/10</strong></div><div class='meta-box'><span>Confianza / Facilidad</span><strong>${b.reliability}% · ${b.ease_of_win}%</strong></div><div class='meta-box'><span>Prioridad</span><strong>${b.portfolio_priority_score}% · ${b.relative_rank_score||0}%</strong></div></div><div class='trade-foot'><strong>Señal:</strong> ${b.key_signal||'—'}<br><strong>Cuándo dejarla:</strong> ${b.invalidation_condition||'—'}<br><strong>Por qué se hizo:</strong> ${b.reasoning||'—'}</div></div>`}
-function renderWatchCard(item){return `<div class='watch-card'><div class='watch-top'><div><div class='watch-q'>${item.question}</div><div class='badge-row'><span class='badge ${item.trade_class||'watch'}'>${bucketLabel(item.trade_class||'watchlist')}</span><span class='badge'>${item.horizon_bucket||'—'}</span>${item.obvious_trade_override?"<span class='badge'>clara</span>":""}</div></div></div><div class='trade-grid'><div class='meta-box'><span>Prioridad</span><strong>${Math.round((item.portfolio_priority_score||0)*100)}%</strong></div><div class='meta-box'><span>Oportunidad</span><strong>${Math.round((item.opportunity_score||0)*100)}%</strong></div><div class='meta-box'><span>Confianza</span><strong>${Math.round((item.reliability||0)*100)}%</strong></div><div class='meta-box'><span>Facilidad</span><strong>${Math.round((item.learnability||0)*100)}% · ${Math.round((item.ease_of_win||0)*100)}%</strong></div></div><div class='watch-foot'>${item.reason||'Todavía no es momento de apostar.'}</div></div>`}
+function renderWatchCard(item){return `<div class='watch-card'><div class='watch-top'><div><div class='watch-q'>${item.question}</div><div class='badge-row'><span class='badge ${item.trade_class||'watch'}'>${bucketLabel(item.trade_class||'watchlist')}</span><span class='badge'>${item.horizon_bucket||'—'}</span>${item.obvious_trade_override?"<span class='badge'>clara</span>":""}</div></div></div><div class='trade-grid'><div class='meta-box'><span>Prioridad</span><strong>${Math.round((item.portfolio_priority_score||0)*100)}%</strong></div><div class='meta-box'><span>Oportunidad</span><strong>${Math.round((item.opportunity_score||0)*100)}%</strong></div><div class='meta-box'><span>Confianza</span><strong>${Math.round((item.reliability||0)*100)}%</strong></div><div class='meta-box'><span>Facilidad</span><strong>${Math.round((item.learnability||0)*100)}% · ${Math.round((item.ease_of_win||0)*100)}%</strong></div></div><div class='watch-foot'>${humanReason(item.reason)||'Todavía no es momento de apostar.'}</div></div>`}
 
-async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Estrategia: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Dinero inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Historial viejo: ${d.legacy_trades_archived||0}`;document.getElementById('runner-pill').textContent=`Bot: ${titleCase(d.runner_health_state||'unknown')}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.7?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*18 + (1-Math.abs((d.portfolio_exposure||0)-0.48))*16 + Math.min((d.positions_per_cycle_last||0)/16,1)*18 + Math.min((d.trades_last_hour||0)/8,1)*12 + Math.min((d.coverage_breadth||0)/8,1)*16 + ((d.runner_health_state||'stale')==='healthy'?20:(d.runner_health_state||'stale')==='delayed'?10:0)));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`${d.runner_summary||'Sin estado del bot.'} Dinero disponible ${money(d.capital_free)} · dinero en uso ${money(d.capital_committed)} · ${d.open_current_lab||0} apuestas activas · ${d.trades_last_hour||0} apuestas en la última hora · ${d.cycles_last_hour||0} análisis en la última hora.`;document.getElementById('perf-summary').innerHTML=`Resultado total <strong>${money(d.total_pnl)}</strong>. Cerrado <strong>${money(d.realized_pnl)}</strong>, abierto <strong>${money(d.unrealized_pnl)}</strong>. Tiempo medio <strong>${d.average_hold_time_hours||0}h</strong>.`;document.getElementById('runner-summary').innerHTML=`Estado: <strong>${titleCase(d.runner_health_state||'unknown')}</strong><br>Automático: <strong>${d.runner_autonomous?'sí':'no'}</strong><br>Última señal: <strong>${timeAgo(d.runner_last_heartbeat)}</strong><br>Último análisis iniciado: <strong>${timeAgo(d.last_cycle_started_at)}</strong><br>Último análisis terminado: <strong>${timeAgo(d.last_cycle_finished_at)}</strong><br>Último análisis bueno: <strong>${timeAgo(d.last_successful_cycle_at)}</strong><br>Estado del último análisis: <strong>${titleCase(d.last_cycle_status||'never')}</strong><br>Duración: <strong>${Math.round((d.last_cycle_duration_ms||0)/1000)}s</strong><br>Conteos: <strong>${d.last_cycle_analyzed||0}</strong> revisadas / <strong>${d.last_cycle_shortlist||0}</strong> preseleccionadas / <strong>${d.last_cycle_selected||0}</strong> apuestas / <strong>${d.last_cycle_watchlist||0}</strong> oportunidades / <strong>${d.last_cycle_rejected||0}</strong> descartadas<br>Análisis última hora: <strong>${d.cycles_last_hour||0}</strong> · Apuestas última hora: <strong>${d.trades_last_hour||0}</strong>${d.last_cycle_error?`<br>Último error: <strong>${d.last_cycle_error}</strong>`:''}`;document.getElementById('mix-summary').innerHTML=`Apuestas por tipo:<br>${objectLines(d.open_count_by_bucket,'Todavía no hay apuestas activas.')}<br><br>Dinero por tipo:<br>${objectLines(d.open_amount_by_bucket,'Todavía no hay dinero en uso.')}<br><br>Tamaño medio:<br>${objectLines(d.average_size_by_bucket,'Todavía no hay tamaños para mostrar.')}<br><br>Prioridad media:<br>${objectLines(d.average_priority_by_bucket,'Todavía no hay resumen.')}<br><br>Por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Por tiempo:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay apuestas abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Acierto por tipo:<br>${objectLines(d.winrate_core_vs_exploratory,'Aún no hay historial suficiente.')}<br><br>Acierto por velocidad:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Acierto por tiempo:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay grupos suficientes.')}<br><br>Apuestas claras en el último análisis: <strong>${d.obvious_trades_last_cycle||0}</strong>`;document.getElementById('pattern-summary').innerHTML=`Lo que más ganó: ${JSON.stringify(d.top_winning_patterns||[])}<br>Lo que más perdió: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>Resultado por tipo:<br>${objectLines(d.pnl_by_trade_class,'Todavía no hay resultados por tipo.')}<br><br>Apuestas claras vs no claras:<br>${objectLines(d.performance_by_obviousness,'Todavía no hay suficiente historial.')}`;document.getElementById('debug-summary').innerHTML=`Bot principal: <strong>${d.runner_leader_id||'—'}</strong><br>Inicio automático: <strong>${d.runner_last_autostart_reason||'—'}</strong><br>Auto-recuperación: <strong>${d.runner_auto_recovered_reason||'—'}</strong><br>Historial viejo: <strong>${d.legacy_trades_archived||0}</strong><br>Descartadas por poca evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartadas por repetición o límite: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Apuestas / oportunidades / descartadas: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong><br>Apuestas última hora: <strong>${d.trades_last_hour||0}</strong> · Análisis última hora: <strong>${d.cycles_last_hour||0}</strong>`}
-async function loadCycle(){const d=await fetch('/candidate-scores').then(r=>r.json());const runner=await fetch('/runner-status').then(r=>r.json());const s=d.summary||{};document.getElementById('cycle-message').textContent=s.headline||'Todavía no hay resumen del último análisis.';document.getElementById('cycle-analyzed').textContent=s.analyzed||0;document.getElementById('cycle-shortlist').textContent=s.shortlist||0;document.getElementById('cycle-selected').textContent=s.selected||0;document.getElementById('cycle-watchlist').textContent=s.watchlist||0;document.getElementById('cycle-rejected').textContent=s.rejected||0;document.getElementById('cycle-mix').innerHTML=`<div class='metric-item'><span>Fuertes</span><strong>${s.core_selected||0}</strong></div><div class='metric-item'><span>Buenas</span><strong>${s.secondary_selected||0}</strong></div><div class='metric-item'><span>Exploración</span><strong>${s.exploratory_selected||0}</strong></div><div class='metric-item'><span>Claras</span><strong>${s.obvious_selected||0}</strong></div>`;const blockers=Object.entries(d.blockers||{});document.getElementById('blockers').innerHTML=blockers.length?blockers.map(([k,v])=>`<div class='reason-item'><span>${titleCase(k)}</span><strong>${v}</strong></div>`).join(''):"<div class='reason-item'><span>No hubo un problema importante</span><strong>OK</strong></div>";document.getElementById('watchlist').innerHTML=(d.watchlist||[]).length?(d.watchlist||[]).slice(0,8).map(renderWatchCard).join(''):"<div class='empty'>No hay oportunidades detectadas en este análisis.</div>";document.getElementById('live-tag').textContent=(runner.runner_health_state||'stale')==='healthy'?'Bot funcionando':(runner.runner_health_state||'stale')==='delayed'?'Bot demorado':'Bot frenado';document.getElementById('bot-status').textContent=(runner.runner_health_state||'stale')==='healthy'?'Bot funcionando':(runner.runner_health_state||'stale')==='delayed'?'Bot demorado':'Bot frenado';document.getElementById('bot-reasoning').textContent=runner.runner_summary||s.headline||'Todavía no hay actividad reciente suficiente.'}
+async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Versión: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Dinero inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Historial viejo: ${d.legacy_trades_archived||0}`;document.getElementById('runner-pill').textContent=`Bot: ${humanLabel(d.runner_health_state||'unknown')}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.7?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*18 + (1-Math.abs((d.portfolio_exposure||0)-0.48))*16 + Math.min((d.positions_per_cycle_last||0)/16,1)*18 + Math.min((d.trades_last_hour||0)/8,1)*12 + Math.min((d.coverage_breadth||0)/8,1)*16 + ((d.runner_health_state||'stale')==='healthy'?20:(d.runner_health_state||'stale')==='delayed'?10:0)));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`${d.runner_summary||'Sin estado del bot.'} Dinero disponible ${money(d.capital_free)} · dinero en uso ${money(d.capital_committed)} · ${d.open_current_lab||0} apuestas activas · ${d.trades_last_hour||0} apuestas en la última hora · ${d.cycles_last_hour||0} análisis en la última hora.`;document.getElementById('perf-summary').innerHTML=`Resultado total <strong>${money(d.total_pnl)}</strong>. Cerrado <strong>${money(d.realized_pnl)}</strong>, abierto <strong>${money(d.unrealized_pnl)}</strong>. Tiempo medio <strong>${d.average_hold_time_hours||0}h</strong>.`;document.getElementById('runner-summary').innerHTML=`Estado: <strong>${humanLabel(d.runner_health_state||'unknown')}</strong><br>Automático: <strong>${d.runner_autonomous?'sí':'no'}</strong><br>Última señal: <strong>${timeAgo(d.runner_last_heartbeat)}</strong><br>Último análisis iniciado: <strong>${timeAgo(d.last_cycle_started_at)}</strong><br>Último análisis terminado: <strong>${timeAgo(d.last_cycle_finished_at)}</strong><br>Último análisis bueno: <strong>${timeAgo(d.last_successful_cycle_at)}</strong><br>Estado del último análisis: <strong>${humanLabel(d.last_cycle_status||'never')}</strong><br>Duración: <strong>${Math.round((d.last_cycle_duration_ms||0)/1000)}s</strong><br>Conteos: <strong>${d.last_cycle_analyzed||0}</strong> revisadas / <strong>${d.last_cycle_shortlist||0}</strong> preseleccionadas / <strong>${d.last_cycle_selected||0}</strong> apuestas / <strong>${d.last_cycle_watchlist||0}</strong> oportunidades / <strong>${d.last_cycle_rejected||0}</strong> descartadas<br>Análisis última hora: <strong>${d.cycles_last_hour||0}</strong> · Apuestas última hora: <strong>${d.trades_last_hour||0}</strong>${d.last_cycle_error?`<br>Último error: <strong>${d.last_cycle_error}</strong>`:''}`;document.getElementById('mix-summary').innerHTML=`Apuestas por tipo:<br>${objectLines(d.open_count_by_bucket,'Todavía no hay apuestas activas.')}<br><br>Dinero por tipo:<br>${objectLines(d.open_amount_by_bucket,'Todavía no hay dinero en uso.')}<br><br>Tamaño medio:<br>${objectLines(d.average_size_by_bucket,'Todavía no hay tamaños para mostrar.')}<br><br>Prioridad media:<br>${objectLines(d.average_priority_by_bucket,'Todavía no hay resumen.')}<br><br>Por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Por tiempo:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay apuestas abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Acierto por tipo:<br>${objectLines(d.winrate_core_vs_exploratory,'Aún no hay historial suficiente.')}<br><br>Acierto por velocidad:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Acierto por tiempo:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay grupos suficientes.')}<br><br>Apuestas claras en el último análisis: <strong>${d.obvious_trades_last_cycle||0}</strong>`;document.getElementById('pattern-summary').innerHTML=`Lo que más ganó: ${JSON.stringify(d.top_winning_patterns||[])}<br>Lo que más perdió: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>Resultado por tipo:<br>${objectLines(d.pnl_by_trade_class,'Todavía no hay resultados por tipo.')}<br><br>Apuestas claras vs no claras:<br>${objectLines(d.performance_by_obviousness,'Todavía no hay suficiente historial.')}`;document.getElementById('debug-summary').innerHTML=`Bot principal: <strong>${d.runner_leader_id||'—'}</strong><br>Inicio automático: <strong>${d.runner_last_autostart_reason||'—'}</strong><br>Auto-recuperación: <strong>${d.runner_auto_recovered_reason||'—'}</strong><br>Historial viejo: <strong>${d.legacy_trades_archived||0}</strong><br>Descartadas por poca evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartadas por repetición o límite: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Apuestas / oportunidades / descartadas: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong><br>Apuestas última hora: <strong>${d.trades_last_hour||0}</strong> · Análisis última hora: <strong>${d.cycles_last_hour||0}</strong>`}
+async function loadCycle(){const d=await fetch('/candidate-scores').then(r=>r.json());const runner=await fetch('/runner-status').then(r=>r.json());const s=d.summary||{};document.getElementById('cycle-message').textContent=s.headline||'Todavía no hay resumen del último análisis.';document.getElementById('cycle-analyzed').textContent=s.analyzed||0;document.getElementById('cycle-shortlist').textContent=s.shortlist||0;document.getElementById('cycle-selected').textContent=s.selected||0;document.getElementById('cycle-watchlist').textContent=s.watchlist||0;document.getElementById('cycle-rejected').textContent=s.rejected||0;document.getElementById('cycle-mix').innerHTML=`<div class='metric-item'><span>Fuertes</span><strong>${s.core_selected||0}</strong></div><div class='metric-item'><span>Buenas</span><strong>${s.secondary_selected||0}</strong></div><div class='metric-item'><span>Exploración</span><strong>${s.exploratory_selected||0}</strong></div><div class='metric-item'><span>Claras</span><strong>${s.obvious_selected||0}</strong></div>`;const blockers=Object.entries(d.blockers||{});document.getElementById('blockers').innerHTML=blockers.length?blockers.map(([k,v])=>`<div class='reason-item'><span>${humanReason(k)}</span><strong>${v}</strong></div>`).join(''):"<div class='reason-item'><span>No hubo un problema importante</span><strong>OK</strong></div>";document.getElementById('watchlist').innerHTML=(d.watchlist||[]).length?(d.watchlist||[]).slice(0,8).map(renderWatchCard).join(''):"<div class='empty'>No hay oportunidades detectadas en este análisis.</div>";document.getElementById('live-tag').textContent=(runner.runner_health_state||'stale')==='healthy'?'Bot funcionando':(runner.runner_health_state||'stale')==='delayed'?'Bot lento':'Bot frenado';document.getElementById('bot-status').textContent=(runner.runner_health_state||'stale')==='healthy'?'Bot funcionando':(runner.runner_health_state||'stale')==='delayed'?'Bot lento':'Bot frenado';document.getElementById('bot-reasoning').textContent=runner.runner_summary||s.headline||'Todavía no hay actividad reciente suficiente.'}
 async function loadBets(){const d=await fetch('/bets').then(r=>r.json());document.getElementById('bets').innerHTML=d.length?d.map(renderTradeCard).join(''):"<div class='empty'>Todavía no hay apuestas activas.</div>"}
-async function runCycle(){document.getElementById('bot-status').textContent='Revisando';document.getElementById('bot-reasoning').textContent='Buscando oportunidades y decidiendo si apostar.';const d=await fetch('/bot-bet',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.placed?'Hizo apuestas':'No apostó';document.getElementById('bot-reasoning').textContent=d.message||d.reasoning||'';await loadAll()}
-async function doMonitor(){document.getElementById('bot-status').textContent='Monitoreando';const d=await fetch('/monitor',{method:'POST'}).then(r=>r.json());document.getElementById('bot-reasoning').textContent=d.message||'Monitor ejecutado';await loadAll()}
+async function runCycle(){document.getElementById('bot-status').textContent='Haciendo análisis';document.getElementById('bot-reasoning').textContent='Buscando oportunidades y decidiendo si apostar.';const d=await fetch('/bot-bet',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.placed?'Hizo apuestas':'No apostó';document.getElementById('bot-reasoning').textContent=d.message||d.reasoning||'';await loadAll()}
+async function doMonitor(){document.getElementById('bot-status').textContent='Revisando apuestas';const d=await fetch('/monitor',{method:'POST'}).then(r=>r.json());document.getElementById('bot-reasoning').textContent=d.message||'Revisión hecha';await loadAll()}
 async function restartRunner(){document.getElementById('bot-status').textContent='Reiniciando bot';const d=await fetch('/runner-restart',{method:'POST'}).then(r=>r.json());document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
 async function resetLab(){if(!confirm('Esto archivará el laboratorio actual y arrancará uno nuevo. ¿Continuar?'))return;const balance=prompt('Balance inicial del nuevo lab','50000');const d=await postJson('/lab-reset',{balance:Number(balance||50000)});document.getElementById('bot-status').textContent=d.ok?'Lab reiniciado':'Error';document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
 async function fundPaper(){const amount=prompt('Capital paper a agregar','10000');if(!amount)return;const d=await postJson('/fund-paper',{amount:Number(amount)});document.getElementById('bot-status').textContent=d.ok?'Capital agregado':'Error';document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
