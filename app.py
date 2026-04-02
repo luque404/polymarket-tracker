@@ -302,6 +302,20 @@ LAST_CYCLE_DATA = {
 }
 
 
+def persist_last_cycle_dashboard(payload):
+    try:
+        set_state("last_cycle_dashboard_json", json.dumps(payload, ensure_ascii=False, default=str))
+        return True
+    except Exception:
+        logger.exception("Failed to persist last cycle dashboard")
+        return False
+
+
+def load_last_cycle_dashboard():
+    payload = safe_json_loads(get_state_text("last_cycle_dashboard_json", ""), {})
+    return payload if isinstance(payload, dict) else {}
+
+
 def get_db():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not configured")
@@ -1010,6 +1024,7 @@ def reset_lab_state(new_epoch=None, balance=None):
     set_state("selected_core_last_cycle", 0)
     set_state("selected_secondary_last_cycle", 0)
     set_state("selected_exploratory_last_cycle", 0)
+    set_state("last_cycle_dashboard_json", "")
     set_state("current_lab_epoch", target_epoch)
     set_state("current_strategy_version", CURRENT_STRATEGY_VERSION)
     set_state("lab_resets", int(get_state("lab_resets", 0)) + 1)
@@ -2973,6 +2988,7 @@ def run_bot_cycle(cycle_id=None):
     ]
     LAST_CYCLE_DATA["summary"] = build_cycle_summary(len(candidates), len(shortlist), selected, watchlist, rejected)
     LAST_CYCLE_DATA["blockers"] = LAST_CYCLE_DATA["summary"].get("blockers", {})
+    persist_last_cycle_dashboard(LAST_CYCLE_DATA)
     set_state("cycles_run", get_state("cycles_run", 0) + 1)
     set_state("markets_analyzed_last_cycle", len(candidates))
     set_state("discarded_low_evidence_last_cycle", sum(1 for _, reason in rejected if reason in ("low_evidence", "weak_edge_or_confidence", "low_score")))
@@ -3325,25 +3341,27 @@ def research_preview():
 
 @app.route("/candidate-scores")
 def candidate_scores():
+    payload = load_last_cycle_dashboard() or LAST_CYCLE_DATA
     return jsonify({
-        "cycle_id": LAST_CYCLE_DATA["cycle_id"],
-        "candidates": LAST_CYCLE_DATA["candidates"],
-        "shortlist": LAST_CYCLE_DATA["shortlist"],
-        "selected": LAST_CYCLE_DATA["selected"],
-        "selected_now": LAST_CYCLE_DATA["selected"],
-        "obvious_selected": [item for item in LAST_CYCLE_DATA["selected"] if item.get("obvious_trade_override")],
-        "watchlist": LAST_CYCLE_DATA["watchlist"],
-        "watchlist_high_potential": LAST_CYCLE_DATA["watchlist"],
-        "rejected": LAST_CYCLE_DATA["rejected"],
-        "rejected_low_quality": LAST_CYCLE_DATA["rejected"],
-        "summary": LAST_CYCLE_DATA["summary"],
-        "blockers": LAST_CYCLE_DATA["blockers"],
+        "cycle_id": payload.get("cycle_id"),
+        "candidates": payload.get("candidates", []),
+        "shortlist": payload.get("shortlist", []),
+        "selected": payload.get("selected", []),
+        "selected_now": payload.get("selected", []),
+        "obvious_selected": [item for item in payload.get("selected", []) if item.get("obvious_trade_override")],
+        "watchlist": payload.get("watchlist", []),
+        "watchlist_high_potential": payload.get("watchlist", []),
+        "rejected": payload.get("rejected", []),
+        "rejected_low_quality": payload.get("rejected", []),
+        "summary": payload.get("summary", {}),
+        "blockers": payload.get("blockers", {}),
     })
 
 
 @app.route("/watchlist")
 def watchlist_endpoint():
-    return jsonify({"cycle_id": LAST_CYCLE_DATA["cycle_id"], "items": LAST_CYCLE_DATA["watchlist"]})
+    payload = load_last_cycle_dashboard() or LAST_CYCLE_DATA
+    return jsonify({"cycle_id": payload.get("cycle_id"), "items": payload.get("watchlist", [])})
 
 
 @app.route("/legacy-summary")
