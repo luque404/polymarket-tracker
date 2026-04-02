@@ -3354,104 +3354,109 @@ def start_background_loops():
 HTML = """<!DOCTYPE html>
 <html>
 <head>
-<title>Polymarket Research Lab</title>
+<title>Polymarket v2</title>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-:root{--bg:#080b11;--panel:#101620;--panel-soft:#141c28;--line:#242f3d;--text:#edf2f7;--muted:#8b96a8;--soft:#b9c2cf;--accent:#87e7c0;--accent-2:#8dbbff;--warn:#f0ce7a;--danger:#ff8b8b}
+:root{--bg:#05060b;--bg2:#0b0f17;--panel:#101423;--panel-soft:#151a2d;--line:#2a3150;--text:#eef2ff;--muted:#93a0bf;--soft:#c8d0e9;--accent:#73ffbc;--accent-2:#b27cff;--accent-3:#86a8ff;--warn:#ffd66e;--danger:#ff8ea7;--glow-violet:0 0 26px rgba(178,124,255,.18);--glow-green:0 0 24px rgba(115,255,188,.14)}
 *{box-sizing:border-box}
-body{margin:0;background:radial-gradient(circle at top,rgba(83,118,173,.18),transparent 30%),linear-gradient(180deg,#070a10,#0b1017);color:var(--text);font-family:Inter,Segoe UI,system-ui,sans-serif}
+body{margin:0;background:linear-gradient(rgba(134,168,255,.04) 1px, transparent 1px),linear-gradient(90deg, rgba(134,168,255,.04) 1px, transparent 1px),radial-gradient(circle at 16% 0%, rgba(178,124,255,.18), transparent 30%),radial-gradient(circle at 84% 8%, rgba(115,255,188,.12), transparent 24%),linear-gradient(180deg,var(--bg),var(--bg2));background-size:34px 34px,34px 34px,auto,auto,auto;color:var(--text);font-family:Segoe UI,system-ui,sans-serif}
 .app-shell{max-width:1360px;margin:0 auto;padding:28px 20px 42px}
 .topbar{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:20px}
-.title-block h1{margin:0;font-size:30px;letter-spacing:-.04em}
-.title-block p{margin:10px 0 0;color:var(--muted);max-width:760px;line-height:1.55}
+.title-block h1{margin:0;font-size:42px;letter-spacing:.18em;text-transform:uppercase;font-weight:900;background:linear-gradient(135deg,#faf7ff 0%,#b27cff 45%,#73ffbc 100%);-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:var(--glow-violet)}
 .pill-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
-.pill{padding:8px 12px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.03);font-size:12px;color:var(--soft)}
+.pill{padding:8px 12px;border-radius:999px;border:1px solid rgba(178,124,255,.16);background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.01));font-size:12px;color:var(--soft)}
 .actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
-.btn{padding:10px 14px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer;font-weight:700}
-.btn:hover{transform:translateY(-1px)}
-.btn-primary{background:linear-gradient(135deg,#97e6c4,#63ceb0);color:#06130d;border-color:transparent}
-.btn-secondary{background:linear-gradient(135deg,#9dc5ff,#7194f5);color:#0a1120;border-color:transparent}
-.btn-danger{background:linear-gradient(135deg,#ff9c9c,#ff7676);color:#260808;border-color:transparent}
-.dashboard{display:grid;grid-template-columns:2fr 1fr;gap:18px}
+.btn{padding:10px 14px;border-radius:12px;border:1px solid rgba(178,124,255,.16);background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.012));color:var(--text);cursor:pointer;font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:11px}
+.btn:hover{transform:translateY(-1px);box-shadow:var(--glow-violet)}
+.btn-primary{background:linear-gradient(135deg,#73ffbc,#6fd8ff);color:#05120d;border-color:transparent}
+.btn-secondary{background:linear-gradient(135deg,#b27cff,#88a8ff);color:#0a0c17;border-color:transparent}
+.btn-danger{background:linear-gradient(135deg,#ff8ea7,#ff7688);color:#25070d;border-color:transparent}
+.dashboard{display:flex;flex-direction:column;gap:18px}
 .column{display:flex;flex-direction:column;gap:18px}
-.panel{background:linear-gradient(180deg,rgba(18,24,33,.98),rgba(14,19,27,.98));border:1px solid var(--line);border-radius:22px;padding:18px}
+.top-priority,.mid-grid,.bottom-grid{display:grid;gap:18px}
+.top-priority{grid-template-columns:1.45fr .95fr}
+.mid-grid{grid-template-columns:1.1fr .9fr}
+.bottom-grid{grid-template-columns:1fr 1fr}
+.panel{background:linear-gradient(180deg,rgba(16,20,35,.98),rgba(11,14,24,.98));border:1px solid rgba(178,124,255,.12);border-radius:22px;padding:18px;box-shadow:0 16px 36px rgba(0,0,0,.24)}
 .hero{display:grid;grid-template-columns:1.3fr .9fr;gap:16px}
-.hero-card,.stat,.mini-stat,.trade-card,.watch-card{background:var(--panel-soft);border:1px solid rgba(255,255,255,.05);border-radius:18px}
+.hero-card,.stat,.mini-stat,.trade-card,.watch-card{background:linear-gradient(180deg,rgba(21,26,45,.96),rgba(16,20,34,.96));border:1px solid rgba(178,124,255,.10);border-radius:18px}
 .hero-card{padding:20px}
-.eyebrow,.section-kicker{font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--muted)}
+.eyebrow,.section-kicker{font-size:11px;text-transform:uppercase;letter-spacing:.17em;color:#91a0c7}
 .hero-value{font-size:34px;letter-spacing:-.05em;margin-top:10px}
 .hero-copy{margin-top:10px;color:var(--soft);font-size:14px;line-height:1.55}
 .status-strip{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-top:16px;padding-top:14px;border-top:1px solid rgba(255,255,255,.06)}
-.status-badge,.badge{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid rgba(255,255,255,.06);background:#1b2230;color:#d1dae5}
-.status-badge{padding:8px 12px;color:var(--accent);background:rgba(135,231,192,.08);border-color:rgba(135,231,192,.2)}
+.status-badge,.badge{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid rgba(178,124,255,.14);background:#171d31;color:#d6def4}
+.status-badge{padding:8px 12px;color:var(--accent);background:rgba(115,255,188,.08);border-color:rgba(115,255,188,.18);box-shadow:var(--glow-green)}
 .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.top-stat-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
 .stat{padding:16px}
+.top-stat{padding:18px;min-height:132px}
 .stat-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}
 .stat-value{margin-top:9px;font-size:28px;letter-spacing:-.04em}
-.stat-note{margin-top:8px;color:var(--soft);font-size:12px;line-height:1.45}
+.stat-note{margin-top:8px;color:var(--muted);font-size:12px;line-height:1.35}
 .positive{color:var(--accent)}.negative{color:var(--danger)}.neutral{color:var(--soft)}
 .section-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:14px}
 .section-title{font-size:18px;font-weight:700;letter-spacing:-.02em}
-.section-sub{margin-top:4px;color:var(--muted);font-size:13px}
+.section-sub{margin-top:4px;color:var(--muted);font-size:12px}
 .cycle-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:14px}
 .mini-stat{padding:14px}
 .mini-stat strong{display:block;font-size:22px;margin-top:6px}
 .message-card{padding:16px;border-radius:16px;background:rgba(135,231,192,.08);border:1px solid rgba(135,231,192,.14);color:#e4faf1;line-height:1.6}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
 .list{display:grid;gap:12px}
+.compact-list{display:grid;gap:10px}
 .trade-card,.watch-card{padding:16px}
 .trade-top,.watch-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
 .trade-q,.watch-q{font-size:15px;font-weight:700;line-height:1.45}
 .badge-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-.core{background:rgba(135,231,192,.12);color:#90e8c7}.secondary{background:rgba(141,187,255,.14);color:#a3caff}.experimental{background:rgba(240,206,122,.15);color:#f1d891}
+.core{background:rgba(115,255,188,.12);color:#97ffd0}.secondary{background:rgba(178,124,255,.14);color:#d2b5ff}.experimental{background:rgba(134,168,255,.14);color:#bdd0ff}
 .trade-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
-.meta-box{padding:10px 12px;border-radius:14px;background:#0f151f;border:1px solid rgba(255,255,255,.04)}
+.meta-box{padding:10px 12px;border-radius:14px;background:#0d1322;border:1px solid rgba(178,124,255,.08)}
 .meta-box span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.11em;margin-bottom:6px}
 .meta-box strong{font-size:13px;color:var(--text);line-height:1.45}
 .trade-foot,.watch-foot{margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.05);font-size:13px;color:var(--soft);line-height:1.55}
 .reason-list,.metric-list{display:grid;gap:8px}
 .reason-item,.metric-item{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px;color:var(--soft)}
 .reason-item:last-child,.metric-item:last-child{border-bottom:none}
-.empty{padding:28px 18px;border-radius:18px;border:1px dashed rgba(255,255,255,.08);text-align:center;color:var(--muted);background:rgba(255,255,255,.02)}
+.empty{padding:28px 18px;border-radius:18px;border:1px dashed rgba(178,124,255,.18);text-align:center;color:var(--muted);background:rgba(255,255,255,.02)}
 details{border-top:1px solid rgba(255,255,255,.06);padding-top:14px}
 details:first-of-type{border-top:none;padding-top:0}
-summary{cursor:pointer;font-weight:700}
+summary{cursor:pointer;font-weight:700;color:#dde5ff}
 .summary-copy{margin-top:10px;font-size:13px;color:var(--soft);line-height:1.6}
-@media(max-width:1180px){.dashboard,.hero,.split{grid-template-columns:1fr}.stat-grid{grid-template-columns:repeat(2,1fr)}.cycle-grid{grid-template-columns:repeat(3,1fr)}}
-@media(max-width:760px){.app-shell{padding:18px 14px 28px}.topbar{flex-direction:column}.actions{justify-content:flex-start}.stat-grid,.cycle-grid,.trade-grid,.split{grid-template-columns:1fr}}
+@media(max-width:1180px){.top-priority,.mid-grid,.bottom-grid,.hero,.split{grid-template-columns:1fr}.top-stat-grid,.stat-grid{grid-template-columns:repeat(2,1fr)}.cycle-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:760px){.app-shell{padding:18px 14px 28px}.topbar{flex-direction:column}.actions{justify-content:flex-start}.top-stat-grid,.stat-grid,.cycle-grid,.trade-grid,.split{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <div class="app-shell">
   <div class="topbar">
     <div class="title-block">
-      <h1>Polymarket Research Lab</h1>
-      <p>Dashboard operativo para entender rápido el estado del laboratorio, el capital, las oportunidades detectadas y el comportamiento del bot en el último ciclo.</p>
+      <h1>Polymarket v2</h1>
       <div class="pill-row">
         <div class="pill" id="lab-pill">Lab activo: —</div>
         <div class="pill" id="strategy-pill">Strategy: —</div>
         <div class="pill" id="bankroll-pill">Bankroll inicial: —</div>
         <div class="pill" id="legacy-pill">Legacy archivado: —</div>
-        <div class="pill" id="runner-pill">Runner: —</div>
+        <div class="pill" id="runner-pill">Bot: —</div>
       </div>
     </div>
     <div class="actions">
       <button class="btn" onclick="loadAll()">Actualizar</button>
       <button class="btn" onclick="doMonitor()">Monitor</button>
       <button class="btn btn-primary" onclick="runCycle()">Correr ciclo</button>
-      <button class="btn" onclick="restartRunner()">Restart runner</button>
-      <button class="btn btn-secondary" onclick="fundPaper()">Fund paper</button>
-      <button class="btn btn-danger" onclick="resetLab()">Reset lab</button>
+      <button class="btn" onclick="restartRunner()">Reiniciar runner</button>
+      <button class="btn btn-secondary" onclick="fundPaper()">Fondear paper</button>
+      <button class="btn btn-danger" onclick="resetLab()">Resetear lab</button>
     </div>
   </div>
 
   <div class="dashboard">
-    <div class="column">
+    <div class="top-priority">
       <div class="panel hero">
         <div class="hero-card">
-          <div class="eyebrow">Estado general</div>
-          <div class="hero-value" id="bot-status">Bot listo</div>
+          <div class="eyebrow">Estado</div>
+          <div class="hero-value" id="bot-status">Listo</div>
           <div class="hero-copy" id="bot-reasoning">Esperando datos del laboratorio actual.</div>
           <div class="status-strip">
             <div>
@@ -3462,88 +3467,93 @@ summary{cursor:pointer;font-weight:700}
           </div>
         </div>
         <div class="hero-card">
-          <div class="eyebrow">Salud del laboratorio</div>
+          <div class="eyebrow">Bot</div>
           <div class="hero-value" id="health-score">0%</div>
-          <div class="hero-copy" id="health-summary">Sin datos todavía para evaluar throughput, coverage y uso del capital.</div>
+          <div class="hero-copy" id="health-summary">Sin señales recientes.</div>
         </div>
       </div>
 
-      <div class="stat-grid">
-        <div class="stat"><div class="stat-label">Capital libre</div><div class="stat-value" id="capital-free">$0</div><div class="stat-note">Caja disponible para nuevas entradas.</div></div>
-        <div class="stat"><div class="stat-label">Capital comprometido</div><div class="stat-value" id="capital-committed">$0</div><div class="stat-note">Capital hoy desplegado en trades abiertos.</div></div>
-        <div class="stat"><div class="stat-label">Exposure</div><div class="stat-value" id="portfolio-exposure">0%</div><div class="stat-note">Uso actual del capital del lab.</div></div>
-        <div class="stat"><div class="stat-label">PnL total</div><div class="stat-value" id="total-pnl">0</div><div class="stat-note">Realizado + unrealized del epoch activo.</div></div>
-        <div class="stat"><div class="stat-label">Trades activos</div><div class="stat-value" id="open-trades">0</div><div class="stat-note">Posiciones abiertas del portfolio actual.</div></div>
-        <div class="stat"><div class="stat-label">Mix operativo</div><div class="stat-value" id="core-exp">0 / 0 / 0</div><div class="stat-note">Core / Secondary / Exploratory.</div></div>
-        <div class="stat"><div class="stat-label">Último ciclo</div><div class="stat-value" id="cycle-stats">0 / 0</div><div class="stat-note">Analizados / enviados a portfolio.</div></div>
-        <div class="stat"><div class="stat-label">Watchlist</div><div class="stat-value" id="watchlist-count">0</div><div class="stat-note">Prometedoras pero todavía sin entrada.</div></div>
+      <div class="top-stat-grid">
+        <div class="stat top-stat"><div class="stat-label">Capital libre</div><div class="stat-value" id="capital-free">$0</div><div class="stat-note">Disponible ahora</div></div>
+        <div class="stat top-stat"><div class="stat-label">Apuestas activas</div><div class="stat-value" id="open-trades">0</div><div class="stat-note">Abiertas ahora</div></div>
+        <div class="stat top-stat"><div class="stat-label">Último análisis</div><div class="stat-value" id="cycle-stats">0 / 0</div><div class="stat-note">Revisadas / Apuestas</div></div>
+        <div class="stat top-stat"><div class="stat-label">Capital comprometido</div><div class="stat-value" id="capital-committed">$0</div><div class="stat-note">En mercado</div></div>
+        <div class="stat top-stat"><div class="stat-label">Exposición</div><div class="stat-value" id="portfolio-exposure">0%</div><div class="stat-note">Uso de capital</div></div>
       </div>
+    </div>
 
+    <div class="mid-grid">
       <div class="panel">
         <div class="section-head">
           <div>
-            <div class="section-kicker">Último ciclo</div>
-            <div class="section-title">Qué hizo el bot</div>
-            <div class="section-sub">Resumen claro del escaneo, la selección y los motivos de no entrada.</div>
+            <div class="section-kicker">Nivel 2</div>
+            <div class="section-title">Qué encontró</div>
+            <div class="section-sub">Oportunidades del último análisis.</div>
           </div>
         </div>
         <div class="cycle-grid">
           <div class="mini-stat"><div class="eyebrow">Analizados</div><strong id="cycle-analyzed">0</strong></div>
-          <div class="mini-stat"><div class="eyebrow">Shortlist</div><strong id="cycle-shortlist">0</strong></div>
-          <div class="mini-stat"><div class="eyebrow">Portfolio</div><strong id="cycle-selected">0</strong></div>
-          <div class="mini-stat"><div class="eyebrow">Watchlist</div><strong id="cycle-watchlist">0</strong></div>
-          <div class="mini-stat"><div class="eyebrow">Rechazados</div><strong id="cycle-rejected">0</strong></div>
+          <div class="mini-stat"><div class="eyebrow">Preseleccionadas</div><strong id="cycle-shortlist">0</strong></div>
+          <div class="mini-stat"><div class="eyebrow">Apuestas hechas</div><strong id="cycle-selected">0</strong></div>
+          <div class="mini-stat"><div class="eyebrow">Oportunidades</div><strong id="cycle-watchlist">0</strong></div>
+          <div class="mini-stat"><div class="eyebrow">Descartadas</div><strong id="cycle-rejected">0</strong></div>
         </div>
-        <div class="split">
-          <div class="panel" style="padding:14px">
-            <div class="section-kicker">Mix del ciclo</div>
-            <div class="metric-list" id="cycle-mix"><div class="metric-item"><span>Sin datos</span><strong>—</strong></div></div>
-          </div>
-          <div class="panel" style="padding:14px">
-            <div class="section-kicker">Motivos de no entrada</div>
-            <div class="reason-list" id="blockers"><div class="reason-item"><span>Sin bloqueos todavía</span><strong>—</strong></div></div>
-          </div>
+        <div class="panel" style="padding:14px;margin-top:14px">
+          <div class="section-kicker">Mix del ciclo</div>
+          <div class="metric-list" id="cycle-mix"><div class="metric-item"><span>Sin datos</span><strong>—</strong></div></div>
+        </div>
+        <div class="panel" style="padding:14px;margin-top:14px">
+          <div class="section-kicker">Posibles apuestas</div>
+          <div class="compact-list" id="watchlist"><div class="empty">No hay oportunidades detectadas en este análisis.</div></div>
         </div>
       </div>
 
       <div class="panel">
         <div class="section-head">
           <div>
-            <div class="section-kicker">Portfolio actual</div>
-            <div class="section-title">Trades abiertos</div>
-            <div class="section-sub">Visión clara del capital desplegado, calidad de cada trade y su invalidación.</div>
+            <div class="section-kicker">Nivel 2</div>
+            <div class="section-title">Por qué no apostó</div>
+            <div class="section-sub">Razones principales.</div>
           </div>
         </div>
-        <div class="list" id="bets"><div class="empty">Todavía no hay trades en este laboratorio.</div></div>
+        <div class="reason-list" id="blockers"><div class="reason-item"><span>Sin bloqueos todavía</span><strong>—</strong></div></div>
+        <div class="panel" style="padding:14px;margin-top:14px">
+          <div class="section-kicker">Mix activo</div>
+          <div class="metric-list">
+            <div class="metric-item"><span>Fuertes / Buenas / Exploración</span><strong id="core-exp">0 / 0 / 0</strong></div>
+            <div class="metric-item"><span>Oportunidades</span><strong id="watchlist-count">0</strong></div>
+            <div class="metric-item"><span>PnL total</span><strong id="total-pnl">0</strong></div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div class="column">
+    <div class="bottom-grid">
       <div class="panel">
         <div class="section-head">
           <div>
-            <div class="section-kicker">Watchlist</div>
-            <div class="section-title">Candidatos prometedores</div>
-            <div class="section-sub">Para distinguir si no apostó porque no encontró nada o porque todavía está esperando mejor entrada.</div>
+            <div class="section-kicker">Nivel 3</div>
+            <div class="section-title">Apuestas activas</div>
+            <div class="section-sub">Detalle de lo que está abierto.</div>
           </div>
         </div>
-        <div class="list" id="watchlist"><div class="empty">No hay candidatos en watchlist en este ciclo.</div></div>
+        <div class="list" id="bets"><div class="empty">Todavía no hay apuestas activas.</div></div>
       </div>
 
       <div class="panel">
         <div class="section-head">
           <div>
-            <div class="section-kicker">Salud y métricas</div>
-            <div class="section-title">Resumen del laboratorio</div>
-            <div class="section-sub">Primero lo importante; abajo el detalle más técnico cuando haga falta.</div>
+            <div class="section-kicker">Nivel 3</div>
+            <div class="section-title">Métricas</div>
+            <div class="section-sub">Información secundaria.</div>
           </div>
         </div>
-        <details open><summary>Performance summary</summary><div class="summary-copy" id="perf-summary">Cargando…</div></details>
-        <details open><summary>Runner telemetry</summary><div class="summary-copy" id="runner-summary">Cargando…</div></details>
-        <details><summary>Portfolio mix</summary><div class="summary-copy" id="mix-summary">Cargando…</div></details>
-        <details><summary>Learning metrics</summary><div class="summary-copy" id="learning-summary">Cargando…</div></details>
-        <details><summary>Winning / losing patterns</summary><div class="summary-copy" id="pattern-summary">Cargando…</div></details>
-        <details><summary>Debug summary</summary><div class="summary-copy" id="debug-summary">Cargando…</div></details>
+        <details open><summary>Bot</summary><div class="summary-copy" id="runner-summary">Cargando…</div></details>
+        <details open><summary>Performance</summary><div class="summary-copy" id="perf-summary">Cargando…</div></details>
+        <details><summary>Mix del portfolio</summary><div class="summary-copy" id="mix-summary">Cargando…</div></details>
+        <details><summary>Aprendizaje</summary><div class="summary-copy" id="learning-summary">Cargando…</div></details>
+        <details><summary>Patrones</summary><div class="summary-copy" id="pattern-summary">Cargando…</div></details>
+        <details><summary>Debug</summary><div class="summary-copy" id="debug-summary">Cargando…</div></details>
       </div>
     </div>
   </div>
@@ -3553,24 +3563,24 @@ function money(value){return '$'+Math.round(value||0).toLocaleString('en-US')}
 function pct(value){return Math.round((value||0)*100)+'%'}
 function metricClass(value){return value>0?'positive':value<0?'negative':'neutral'}
 function titleCase(value){return (value||'—').replaceAll('_',' ')}
-function bucketLabel(value){return value==='experimental'?'exploratory':titleCase(value)}
+function bucketLabel(value){if(value==='experimental')return 'exploración';if(value==='secondary')return 'buena';if(value==='core')return 'fuerte';return titleCase(value)}
 function timeAgo(value){if(!value)return '—';const then=new Date(value);const diff=Math.max(0,Math.floor((Date.now()-then.getTime())/1000));if(diff<60)return `${diff}s`;const m=Math.floor(diff/60);if(m<60)return `${m}m`;const h=Math.floor(m/60);if(h<24)return `${h}h ${m%60}m`;const d=Math.floor(h/24);return `${d}d ${h%24}h`}
 function objectLines(obj, empty='—'){const entries=Object.entries(obj||{});if(!entries.length)return empty;return entries.map(([k,v])=>`${titleCase(k)}: ${typeof v==='object'?JSON.stringify(v):v}`).join('<br>')}
 async function postJson(url,payload){const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});return res.json()}
 
 function setValue(id,text,raw){const el=document.getElementById(id);el.textContent=text;if(raw!==undefined){el.className=(el.className.includes('hero-value')?'hero-value ':'stat-value ')+metricClass(raw)}}
 
-function renderTradeCard(b){return `<div class='trade-card'><div class='trade-top'><div><div class='trade-q'>${b.question}</div><div class='badge-row'><span class='badge ${b.trade_class}'>${bucketLabel(b.trade_class)}</span><span class='badge'>${b.tier}</span><span class='badge'>${b.horizon_bucket||'—'}</span><span class='badge'>${b.category}</span>${b.obvious_trade_override?"<span class='badge'>obvious</span>":""}</div></div><div class='badge'>${b.status_text}</div></div><div class='trade-grid'><div class='meta-box'><span>Posición</span><strong>${b.side} · ${money(b.amount)}</strong></div><div class='meta-box'><span>PnL</span><strong class='${metricClass(b.pnl||0)}'>${b.pnl_text}</strong></div><div class='meta-box'><span>Entry / Current</span><strong>${b.price_entry||0} / ${b.price_current||0}</strong></div><div class='meta-box'><span>Edge / Confidence</span><strong>${b.edge}pp · ${b.confidence}/10</strong></div><div class='meta-box'><span>Reliability / Ease</span><strong>${b.reliability}% · ${b.ease_of_win}%</strong></div><div class='meta-box'><span>Priority / Rank</span><strong>${b.portfolio_priority_score}% · ${b.relative_rank_score||0}%</strong></div></div><div class='trade-foot'><strong>Señal clave:</strong> ${b.key_signal||'—'}<br><strong>Invalidación:</strong> ${b.invalidation_condition||'—'}<br><strong>Racional:</strong> ${b.reasoning||'—'}</div></div>`}
-function renderWatchCard(item){return `<div class='watch-card'><div class='watch-top'><div><div class='watch-q'>${item.question}</div><div class='badge-row'><span class='badge ${item.trade_class||'watch'}'>${bucketLabel(item.trade_class||'watchlist')}</span><span class='badge'>${item.tier||'—'}</span><span class='badge'>${item.horizon_bucket||'—'}</span>${item.obvious_trade_override?"<span class='badge'>obvious</span>":""}</div></div></div><div class='trade-grid'><div class='meta-box'><span>Priority</span><strong>${Math.round((item.portfolio_priority_score||0)*100)}%</strong></div><div class='meta-box'><span>Opportunity</span><strong>${Math.round((item.opportunity_score||0)*100)}%</strong></div><div class='meta-box'><span>Reliability</span><strong>${Math.round((item.reliability||0)*100)}%</strong></div><div class='meta-box'><span>Learnability / Ease</span><strong>${Math.round((item.learnability||0)*100)}% · ${Math.round((item.ease_of_win||0)*100)}%</strong></div></div><div class='watch-foot'>${item.reason||'Necesita un poco más de prioridad o espacio en portfolio antes de entrar.'}</div></div>`}
+function renderTradeCard(b){return `<div class='trade-card'><div class='trade-top'><div><div class='trade-q'>${b.question}</div><div class='badge-row'><span class='badge ${b.trade_class}'>${bucketLabel(b.trade_class)}</span><span class='badge'>${b.horizon_bucket||'—'}</span><span class='badge'>${b.category}</span>${b.obvious_trade_override?"<span class='badge'>clara</span>":""}</div></div><div class='badge'>${b.status_text}</div></div><div class='trade-grid'><div class='meta-box'><span>Apuesta</span><strong>${b.side} · ${money(b.amount)}</strong></div><div class='meta-box'><span>Resultado</span><strong class='${metricClass(b.pnl||0)}'>${b.pnl_text}</strong></div><div class='meta-box'><span>Entrada / Ahora</span><strong>${b.price_entry||0} / ${b.price_current||0}</strong></div><div class='meta-box'><span>Ventaja / Confianza</span><strong>${b.edge}pp · ${b.confidence}/10</strong></div><div class='meta-box'><span>Confianza / Facilidad</span><strong>${b.reliability}% · ${b.ease_of_win}%</strong></div><div class='meta-box'><span>Prioridad</span><strong>${b.portfolio_priority_score}% · ${b.relative_rank_score||0}%</strong></div></div><div class='trade-foot'><strong>Señal:</strong> ${b.key_signal||'—'}<br><strong>Cuándo dejarla:</strong> ${b.invalidation_condition||'—'}<br><strong>Por qué se hizo:</strong> ${b.reasoning||'—'}</div></div>`}
+function renderWatchCard(item){return `<div class='watch-card'><div class='watch-top'><div><div class='watch-q'>${item.question}</div><div class='badge-row'><span class='badge ${item.trade_class||'watch'}'>${bucketLabel(item.trade_class||'watchlist')}</span><span class='badge'>${item.horizon_bucket||'—'}</span>${item.obvious_trade_override?"<span class='badge'>clara</span>":""}</div></div></div><div class='trade-grid'><div class='meta-box'><span>Prioridad</span><strong>${Math.round((item.portfolio_priority_score||0)*100)}%</strong></div><div class='meta-box'><span>Oportunidad</span><strong>${Math.round((item.opportunity_score||0)*100)}%</strong></div><div class='meta-box'><span>Confianza</span><strong>${Math.round((item.reliability||0)*100)}%</strong></div><div class='meta-box'><span>Facilidad</span><strong>${Math.round((item.learnability||0)*100)}% · ${Math.round((item.ease_of_win||0)*100)}%</strong></div></div><div class='watch-foot'>${item.reason||'Todavía no es momento de apostar.'}</div></div>`}
 
-async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Strategy: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Bankroll inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Legacy archivado: ${d.legacy_trades_archived||0}`;document.getElementById('runner-pill').textContent=`Runner: ${titleCase(d.runner_health_state||'unknown')}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.7?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*18 + (1-Math.abs((d.portfolio_exposure||0)-0.48))*16 + Math.min((d.positions_per_cycle_last||0)/16,1)*18 + Math.min((d.trades_last_hour||0)/8,1)*12 + Math.min((d.coverage_breadth||0)/8,1)*16 + ((d.runner_health_state||'stale')==='healthy'?20:(d.runner_health_state||'stale')==='delayed'?10:0)));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`${d.runner_summary||'Sin estado de runner.'} Capital libre ${money(d.capital_free)} · comprometido ${money(d.capital_committed)} · ${d.open_current_lab||0} trades abiertos · ${d.trades_last_hour||0} trades en la última hora · ${d.cycles_last_hour||0} ciclos en la última hora.`;document.getElementById('perf-summary').innerHTML=`PnL total <strong>${money(d.total_pnl)}</strong>. Realizado <strong>${money(d.realized_pnl)}</strong>, unrealized <strong>${money(d.unrealized_pnl)}</strong>. Hold medio <strong>${d.average_hold_time_hours||0}h</strong> y feedback temprano en <strong>${d.early_feedback_pct||0}%</strong> de los trades cerrados.`;document.getElementById('runner-summary').innerHTML=`Health: <strong>${titleCase(d.runner_health_state||'unknown')}</strong><br>Autónomo: <strong>${d.runner_autonomous?'sí':'no'}</strong><br>Último heartbeat: <strong>${timeAgo(d.runner_last_heartbeat)}</strong><br>Último ciclo iniciado: <strong>${timeAgo(d.last_cycle_started_at)}</strong><br>Último ciclo terminado: <strong>${timeAgo(d.last_cycle_finished_at)}</strong><br>Último ciclo exitoso: <strong>${timeAgo(d.last_successful_cycle_at)}</strong><br>Status último ciclo: <strong>${titleCase(d.last_cycle_status||'never')}</strong><br>Duración último ciclo: <strong>${Math.round((d.last_cycle_duration_ms||0)/1000)}s</strong><br>Counts último ciclo: <strong>${d.last_cycle_analyzed||0}</strong> analyzed / <strong>${d.last_cycle_shortlist||0}</strong> shortlist / <strong>${d.last_cycle_selected||0}</strong> selected / <strong>${d.last_cycle_watchlist||0}</strong> watchlist / <strong>${d.last_cycle_rejected||0}</strong> rejected<br>Ciclos última hora: <strong>${d.cycles_last_hour||0}</strong> · Trades abiertos última hora: <strong>${d.trades_last_hour||0}</strong><br>Autostart: <strong>${timeAgo(d.runner_last_autostart_at)}</strong>${d.runner_last_autostart_reason?` (${d.runner_last_autostart_reason})`:''}<br>Auto-recovery: <strong>${timeAgo(d.runner_auto_recovered_at)}</strong>${d.runner_auto_recovered_reason?` (${d.runner_auto_recovered_reason})`:''} · count <strong>${d.runner_auto_recovery_count||0}</strong>${d.last_cycle_error?`<br>Último error: <strong>${d.last_cycle_error}</strong>`:''}`;document.getElementById('mix-summary').innerHTML=`Counts por bucket:<br>${objectLines(d.open_count_by_bucket,'Todavía no hay trades abiertos.')}<br><br>Capital por bucket:<br>${objectLines(d.open_amount_by_bucket,'Todavía no hay capital desplegado.')}<br><br>Average size por bucket:<br>${objectLines(d.average_size_by_bucket,'Todavía no hay tamaños para resumir.')}<br><br>Priority media por bucket:<br>${objectLines(d.average_priority_by_bucket,'Sin quality summary todavía.')}<br><br>Exposure por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Exposure por horizon:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay posiciones abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Winrate por bucket:<br>${objectLines(d.winrate_core_vs_exploratory,'Aún no hay historial suficiente.')}<br><br>Winrate por learning velocity:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Winrate por time bucket:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay buckets suficientes.')}<br><br>Obvious trades último ciclo: <strong>${d.obvious_trades_last_cycle||0}</strong>`;document.getElementById('pattern-summary').innerHTML=`Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}<br>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>PnL por bucket:<br>${objectLines(d.pnl_by_trade_class,'Todavía no hay PnL por bucket.')}<br><br>Performance obvious vs non-obvious:<br>${objectLines(d.performance_by_obviousness,'Todavía no hay suficiente historial.')}`;document.getElementById('debug-summary').innerHTML=`Leader actual: <strong>${d.runner_leader_id||'—'}</strong><br>Autostart reason: <strong>${d.runner_last_autostart_reason||'—'}</strong><br>Auto-recovery reason: <strong>${d.runner_auto_recovered_reason||'—'}</strong><br>Legacy archivados: <strong>${d.legacy_trades_archived||0}</strong><br>Descartados por evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartados por correlación/exposure: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Selected / watchlist / rejected: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong><br>Trades última hora: <strong>${d.trades_last_hour||0}</strong> · Ciclos última hora: <strong>${d.cycles_last_hour||0}</strong>`}
-async function loadCycle(){const d=await fetch('/candidate-scores').then(r=>r.json());const runner=await fetch('/runner-status').then(r=>r.json());const s=d.summary||{};document.getElementById('cycle-message').textContent=s.headline||'Todavía no hay resumen del último ciclo.';document.getElementById('cycle-analyzed').textContent=s.analyzed||0;document.getElementById('cycle-shortlist').textContent=s.shortlist||0;document.getElementById('cycle-selected').textContent=s.selected||0;document.getElementById('cycle-watchlist').textContent=s.watchlist||0;document.getElementById('cycle-rejected').textContent=s.rejected||0;document.getElementById('cycle-mix').innerHTML=`<div class='metric-item'><span>Core</span><strong>${s.core_selected||0}</strong></div><div class='metric-item'><span>Secondary</span><strong>${s.secondary_selected||0}</strong></div><div class='metric-item'><span>Exploratory</span><strong>${s.exploratory_selected||0}</strong></div><div class='metric-item'><span>Obvious overrides</span><strong>${s.obvious_selected||0}</strong></div>`;const blockers=Object.entries(d.blockers||{});document.getElementById('blockers').innerHTML=blockers.length?blockers.map(([k,v])=>`<div class='reason-item'><span>${titleCase(k)}</span><strong>${v}</strong></div>`).join(''):"<div class='reason-item'><span>No hubo bloqueos relevantes en el último ciclo.</span><strong>OK</strong></div>";document.getElementById('watchlist').innerHTML=(d.watchlist||[]).length?(d.watchlist||[]).slice(0,8).map(renderWatchCard).join(''):"<div class='empty'>No hay candidatos en watchlist en este ciclo.</div>";document.getElementById('live-tag').textContent=(runner.runner_health_state||'stale')==='healthy'?'Runner healthy':(runner.runner_health_state||'stale')==='delayed'?'Runner delayed':'Runner stale';document.getElementById('bot-status').textContent=(runner.runner_health_state||'stale')==='healthy'?'Runner activo':(runner.runner_health_state||'stale')==='delayed'?'Runner demorado':'Runner stale';document.getElementById('bot-reasoning').textContent=runner.runner_summary||s.headline||'Todavía no hay actividad reciente suficiente.'}
-async function loadBets(){const d=await fetch('/bets').then(r=>r.json());document.getElementById('bets').innerHTML=d.length?d.map(renderTradeCard).join(''):"<div class='empty'>Todavía no hay trades en este laboratorio.</div>"}
-async function runCycle(){document.getElementById('bot-status').textContent='Corriendo ciclo';document.getElementById('bot-reasoning').textContent='Investigando mercados, armando ranking y evaluando entradas.';const d=await fetch('/bot-bet',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.placed?'Bot operando':'Bot en espera';document.getElementById('bot-reasoning').textContent=d.message||d.reasoning||'';await loadAll()}
-async function doMonitor(){document.getElementById('bot-status').textContent='Monitoreando portfolio';const d=await fetch('/monitor',{method:'POST'}).then(r=>r.json());document.getElementById('bot-reasoning').textContent=d.message||'Monitor ejecutado';await loadAll()}
-async function restartRunner(){document.getElementById('bot-status').textContent='Reiniciando runner';const d=await fetch('/runner-restart',{method:'POST'}).then(r=>r.json());document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
-async function resetLab(){if(!confirm('Esto archivará el laboratorio actual y arrancará uno nuevo. ¿Continuar?'))return;const balance=prompt('Balance inicial del nuevo lab','50000');const d=await postJson('/lab-reset',{balance:Number(balance||50000)});document.getElementById('bot-status').textContent=d.ok?'Lab reseteado':'Error al resetear';document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
-async function fundPaper(){const amount=prompt('Capital paper a agregar','10000');if(!amount)return;const d=await postJson('/fund-paper',{amount:Number(amount)});document.getElementById('bot-status').textContent=d.ok?'Capital agregado':'No se pudo agregar capital';document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
+async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Estrategia: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Dinero inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Historial viejo: ${d.legacy_trades_archived||0}`;document.getElementById('runner-pill').textContent=`Bot: ${titleCase(d.runner_health_state||'unknown')}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.7?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*18 + (1-Math.abs((d.portfolio_exposure||0)-0.48))*16 + Math.min((d.positions_per_cycle_last||0)/16,1)*18 + Math.min((d.trades_last_hour||0)/8,1)*12 + Math.min((d.coverage_breadth||0)/8,1)*16 + ((d.runner_health_state||'stale')==='healthy'?20:(d.runner_health_state||'stale')==='delayed'?10:0)));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`${d.runner_summary||'Sin estado del bot.'} Dinero disponible ${money(d.capital_free)} · dinero en uso ${money(d.capital_committed)} · ${d.open_current_lab||0} apuestas activas · ${d.trades_last_hour||0} apuestas en la última hora · ${d.cycles_last_hour||0} análisis en la última hora.`;document.getElementById('perf-summary').innerHTML=`Resultado total <strong>${money(d.total_pnl)}</strong>. Cerrado <strong>${money(d.realized_pnl)}</strong>, abierto <strong>${money(d.unrealized_pnl)}</strong>. Tiempo medio <strong>${d.average_hold_time_hours||0}h</strong>.`;document.getElementById('runner-summary').innerHTML=`Estado: <strong>${titleCase(d.runner_health_state||'unknown')}</strong><br>Automático: <strong>${d.runner_autonomous?'sí':'no'}</strong><br>Última señal: <strong>${timeAgo(d.runner_last_heartbeat)}</strong><br>Último análisis iniciado: <strong>${timeAgo(d.last_cycle_started_at)}</strong><br>Último análisis terminado: <strong>${timeAgo(d.last_cycle_finished_at)}</strong><br>Último análisis bueno: <strong>${timeAgo(d.last_successful_cycle_at)}</strong><br>Estado del último análisis: <strong>${titleCase(d.last_cycle_status||'never')}</strong><br>Duración: <strong>${Math.round((d.last_cycle_duration_ms||0)/1000)}s</strong><br>Conteos: <strong>${d.last_cycle_analyzed||0}</strong> revisadas / <strong>${d.last_cycle_shortlist||0}</strong> preseleccionadas / <strong>${d.last_cycle_selected||0}</strong> apuestas / <strong>${d.last_cycle_watchlist||0}</strong> oportunidades / <strong>${d.last_cycle_rejected||0}</strong> descartadas<br>Análisis última hora: <strong>${d.cycles_last_hour||0}</strong> · Apuestas última hora: <strong>${d.trades_last_hour||0}</strong>${d.last_cycle_error?`<br>Último error: <strong>${d.last_cycle_error}</strong>`:''}`;document.getElementById('mix-summary').innerHTML=`Apuestas por tipo:<br>${objectLines(d.open_count_by_bucket,'Todavía no hay apuestas activas.')}<br><br>Dinero por tipo:<br>${objectLines(d.open_amount_by_bucket,'Todavía no hay dinero en uso.')}<br><br>Tamaño medio:<br>${objectLines(d.average_size_by_bucket,'Todavía no hay tamaños para mostrar.')}<br><br>Prioridad media:<br>${objectLines(d.average_priority_by_bucket,'Todavía no hay resumen.')}<br><br>Por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Por tiempo:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay apuestas abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Acierto por tipo:<br>${objectLines(d.winrate_core_vs_exploratory,'Aún no hay historial suficiente.')}<br><br>Acierto por velocidad:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Acierto por tiempo:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay grupos suficientes.')}<br><br>Apuestas claras en el último análisis: <strong>${d.obvious_trades_last_cycle||0}</strong>`;document.getElementById('pattern-summary').innerHTML=`Lo que más ganó: ${JSON.stringify(d.top_winning_patterns||[])}<br>Lo que más perdió: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>Resultado por tipo:<br>${objectLines(d.pnl_by_trade_class,'Todavía no hay resultados por tipo.')}<br><br>Apuestas claras vs no claras:<br>${objectLines(d.performance_by_obviousness,'Todavía no hay suficiente historial.')}`;document.getElementById('debug-summary').innerHTML=`Bot principal: <strong>${d.runner_leader_id||'—'}</strong><br>Inicio automático: <strong>${d.runner_last_autostart_reason||'—'}</strong><br>Auto-recuperación: <strong>${d.runner_auto_recovered_reason||'—'}</strong><br>Historial viejo: <strong>${d.legacy_trades_archived||0}</strong><br>Descartadas por poca evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartadas por repetición o límite: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Apuestas / oportunidades / descartadas: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong><br>Apuestas última hora: <strong>${d.trades_last_hour||0}</strong> · Análisis última hora: <strong>${d.cycles_last_hour||0}</strong>`}
+async function loadCycle(){const d=await fetch('/candidate-scores').then(r=>r.json());const runner=await fetch('/runner-status').then(r=>r.json());const s=d.summary||{};document.getElementById('cycle-message').textContent=s.headline||'Todavía no hay resumen del último análisis.';document.getElementById('cycle-analyzed').textContent=s.analyzed||0;document.getElementById('cycle-shortlist').textContent=s.shortlist||0;document.getElementById('cycle-selected').textContent=s.selected||0;document.getElementById('cycle-watchlist').textContent=s.watchlist||0;document.getElementById('cycle-rejected').textContent=s.rejected||0;document.getElementById('cycle-mix').innerHTML=`<div class='metric-item'><span>Fuertes</span><strong>${s.core_selected||0}</strong></div><div class='metric-item'><span>Buenas</span><strong>${s.secondary_selected||0}</strong></div><div class='metric-item'><span>Exploración</span><strong>${s.exploratory_selected||0}</strong></div><div class='metric-item'><span>Claras</span><strong>${s.obvious_selected||0}</strong></div>`;const blockers=Object.entries(d.blockers||{});document.getElementById('blockers').innerHTML=blockers.length?blockers.map(([k,v])=>`<div class='reason-item'><span>${titleCase(k)}</span><strong>${v}</strong></div>`).join(''):"<div class='reason-item'><span>No hubo un problema importante</span><strong>OK</strong></div>";document.getElementById('watchlist').innerHTML=(d.watchlist||[]).length?(d.watchlist||[]).slice(0,8).map(renderWatchCard).join(''):"<div class='empty'>No hay oportunidades detectadas en este análisis.</div>";document.getElementById('live-tag').textContent=(runner.runner_health_state||'stale')==='healthy'?'Bot funcionando':(runner.runner_health_state||'stale')==='delayed'?'Bot demorado':'Bot frenado';document.getElementById('bot-status').textContent=(runner.runner_health_state||'stale')==='healthy'?'Bot funcionando':(runner.runner_health_state||'stale')==='delayed'?'Bot demorado':'Bot frenado';document.getElementById('bot-reasoning').textContent=runner.runner_summary||s.headline||'Todavía no hay actividad reciente suficiente.'}
+async function loadBets(){const d=await fetch('/bets').then(r=>r.json());document.getElementById('bets').innerHTML=d.length?d.map(renderTradeCard).join(''):"<div class='empty'>Todavía no hay apuestas activas.</div>"}
+async function runCycle(){document.getElementById('bot-status').textContent='Revisando';document.getElementById('bot-reasoning').textContent='Buscando oportunidades y decidiendo si apostar.';const d=await fetch('/bot-bet',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.placed?'Hizo apuestas':'No apostó';document.getElementById('bot-reasoning').textContent=d.message||d.reasoning||'';await loadAll()}
+async function doMonitor(){document.getElementById('bot-status').textContent='Monitoreando';const d=await fetch('/monitor',{method:'POST'}).then(r=>r.json());document.getElementById('bot-reasoning').textContent=d.message||'Monitor ejecutado';await loadAll()}
+async function restartRunner(){document.getElementById('bot-status').textContent='Reiniciando bot';const d=await fetch('/runner-restart',{method:'POST'}).then(r=>r.json());document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
+async function resetLab(){if(!confirm('Esto archivará el laboratorio actual y arrancará uno nuevo. ¿Continuar?'))return;const balance=prompt('Balance inicial del nuevo lab','50000');const d=await postJson('/lab-reset',{balance:Number(balance||50000)});document.getElementById('bot-status').textContent=d.ok?'Lab reiniciado':'Error';document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
+async function fundPaper(){const amount=prompt('Capital paper a agregar','10000');if(!amount)return;const d=await postJson('/fund-paper',{amount:Number(amount)});document.getElementById('bot-status').textContent=d.ok?'Capital agregado':'Error';document.getElementById('bot-reasoning').textContent=d.message||d.error||'';await loadAll()}
 async function loadAll(){await Promise.all([loadMetrics(),loadCycle(),loadBets()])}
 loadAll();setInterval(loadAll,12000)
 </script>
