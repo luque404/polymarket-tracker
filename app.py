@@ -48,6 +48,7 @@ CURRENT_STRATEGY_VERSION = os.environ.get("STRATEGY_VERSION", "research_lab_v4")
 FAST_MODEL = os.environ.get("CLAUDE_FAST_MODEL", "claude-haiku-4-5-20251001")
 STRONG_MODEL = os.environ.get("CLAUDE_STRONG_MODEL", "claude-sonnet-4-6")
 REQUEST_TIMEOUT = 8
+REDDIT_TIMEOUT_SECONDS = float(os.environ.get("REDDIT_TIMEOUT_SECONDS", "2.0"))
 BET_LOOP_INTERVAL_SECONDS = int(os.environ.get("BET_LOOP_INTERVAL_SECONDS", "180"))
 MONITOR_LOOP_INTERVAL_SECONDS = 3600
 INITIAL_RESOLUTION_CHECK_SECONDS = 3600
@@ -1578,24 +1579,32 @@ def fetch_wikipedia_source(question):
 
 
 def fetch_reddit_source(question):
+    empty_result = {"summary": "", "count": 0, "score": 0.0, "quality": SOURCE_WEIGHTS["crowd"]}
     try:
         query = " ".join(keyword_tokens(question)[:4]) or question
         response = requests.get(
             "https://www.reddit.com/search.json",
             params={"q": query, "sort": "new", "limit": 8, "t": "week"},
             headers={"User-Agent": "PolymarketBot/3.0"},
-            timeout=REQUEST_TIMEOUT,
+            timeout=REDDIT_TIMEOUT_SECONDS,
         )
+        response.raise_for_status()
         posts = response.json().get("data", {}).get("children", [])
         if not posts:
-            return {"summary": "", "count": 0, "score": 0.0, "quality": SOURCE_WEIGHTS["crowd"]}
+            return empty_result
         titles = [post["data"].get("title", "") for post in posts[:4]]
         avg_score = mean([safe_float(post["data"].get("score")) for post in posts[:4]])
         crowd_score = clamp(avg_score / 30.0, -1.0, 1.0)
         return {"summary": " | ".join(titles), "count": len(titles), "score": crowd_score, "quality": SOURCE_WEIGHTS["crowd"]}
-    except (requests.RequestException, ValueError, KeyError, TypeError):
-        logger.exception("Reddit fetch failed for question=%s", question[:80])
-        return {"summary": "", "count": 0, "score": 0.0, "quality": SOURCE_WEIGHTS["crowd"]}
+    except requests.Timeout:
+        logger.warning("Reddit timeout, skipping question=%s", question[:80])
+        return empty_result
+    except requests.RequestException as exc:
+        logger.warning("Reddit failed, skipping question=%s error=%s", question[:80], type(exc).__name__)
+        return empty_result
+    except (ValueError, KeyError, TypeError) as exc:
+        logger.warning("Reddit parse failed, skipping question=%s error=%s", question[:80], type(exc).__name__)
+        return empty_result
 
 # ── MEMORY / RESEARCH ENGINE ─────────────────────────────────
 def get_current_lab_bets():
