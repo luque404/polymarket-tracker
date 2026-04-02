@@ -35,6 +35,7 @@ NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
 METACULUS_API_KEY = os.environ.get("METACULUS_API_KEY", "")
 ENABLE_BACKGROUND_LOOPS = os.environ.get("ENABLE_BACKGROUND_LOOPS", "").lower() == "true"
 RESEARCH_LAB_MODE = os.environ.get("RESEARCH_LAB_MODE", "true").lower() == "true"
+RUNNER_AUTONOMOUS = os.environ.get("RUNNER_AUTONOMOUS", "true").lower() == "true"
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
@@ -55,6 +56,7 @@ RUNNER_HEARTBEAT_SECONDS = int(os.environ.get("RUNNER_HEARTBEAT_SECONDS", str(ma
 RUNNER_LEASE_SECONDS = int(os.environ.get("RUNNER_LEASE_SECONDS", str(max(180, BET_LOOP_INTERVAL_SECONDS * 3))))
 RUNNER_STALE_AFTER_SECONDS = int(os.environ.get("RUNNER_STALE_AFTER_SECONDS", str(max(600, BET_LOOP_INTERVAL_SECONDS * 4))))
 RUNNER_CYCLE_LOCK_TIMEOUT_SECONDS = int(os.environ.get("RUNNER_CYCLE_LOCK_TIMEOUT_SECONDS", str(max(300, BET_LOOP_INTERVAL_SECONDS * 4))))
+RUNNER_WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("RUNNER_WATCHDOG_INTERVAL_SECONDS", "30"))
 MARKETS_FETCH_LIMIT = 500
 MARKETS_PREVIEW_LIMIT = 20
 MAX_OPEN_BETS = 140
@@ -258,6 +260,11 @@ STATE_DEFAULTS = {
     "last_successful_cycle_at": "",
     "runner_cycle_lock_owner": "",
     "runner_cycle_lock_until": "",
+    "runner_last_autostart_at": "",
+    "runner_last_autostart_reason": "",
+    "runner_auto_recovered_at": "",
+    "runner_auto_recovered_reason": "",
+    "runner_auto_recovery_count": "0",
 }
 
 RUNNER_CYCLES_SCHEMA = {
@@ -279,6 +286,9 @@ RUNNER_CYCLES_SCHEMA = {
 
 BACKGROUND_LOOPS_LOCK = threading.Lock()
 BACKGROUND_LOOPS_STARTED = False
+BET_LOOP_THREAD = None
+MONITOR_LOOP_THREAD = None
+RUNNER_WATCHDOG_THREAD = None
 LAST_CYCLE_DATA = {
     "cycle_id": None,
     "candidates": [],
@@ -428,6 +438,10 @@ def set_runner_enabled(enabled):
             "runner_leader_id": "",
             "runner_last_heartbeat": "",
         })
+
+
+def should_run_background_loops():
+    return ENABLE_BACKGROUND_LOOPS or RUNNER_AUTONOMOUS
 
 
 def claim_runner_leader(force=False):
@@ -746,11 +760,17 @@ def build_runner_status():
         summary = f"{summary} El runner está activo pero no encontró entradas en los últimos {zero_entry_streak} ciclos."
     return {
         "runner_enabled": runner_enabled,
+        "runner_autonomous": RUNNER_AUTONOMOUS,
         "runner_process_id": RUNNER_PROCESS_ID,
         "runner_leader_id": get_state_text("runner_leader_id", ""),
         "runner_last_heartbeat": to_iso(last_heartbeat),
         "runner_health_state": health,
         "runner_stale_after_seconds": RUNNER_STALE_AFTER_SECONDS,
+        "runner_last_autostart_at": get_state_text("runner_last_autostart_at", ""),
+        "runner_last_autostart_reason": get_state_text("runner_last_autostart_reason", ""),
+        "runner_auto_recovered_at": get_state_text("runner_auto_recovered_at", ""),
+        "runner_auto_recovered_reason": get_state_text("runner_auto_recovered_reason", ""),
+        "runner_auto_recovery_count": int(get_state("runner_auto_recovery_count", 0)),
         "last_cycle_started_at": to_iso(last_started),
         "last_cycle_finished_at": to_iso(last_finished),
         "last_cycle_status": get_state_text("last_cycle_status", "never"),
@@ -986,12 +1006,52 @@ def is_duplicate_or_near_duplicate(candidate, existing_bets, selected):
         other_question = normalize_question(bet.get("question", "")).lower()
         if other_question and hash_text(other_question) == identity["question_key"]:
             return True, "duplicate_question"
-        overlap = len(top_overlap_terms(packet.get("market_question", ""), bet.get("question", "")))
+        other_packet = safe_json_loads(bet.get("research_packet"), {}) if isinstance(bet, dict) else {}
+        other_semantic_key = hash_text(
+            "|".join([
+                bet.get("category", other_packet.get("category", "")),
+                other_packet.get("semantic_subject", ""),
+                other_packet.get("semantic_event", ""),
+                other_packet.get("semantic_deadline", "") or "",
+                bet.get("side", ""),
+            ]).lower()
+        ) if (bet.get("category") or other_packet) else ""
+        overlap_terms = top_overlap_terms(packet.get("market_question", ""), bet.get("question", ""))
+        overlap = len(overlap_terms)
         same_category = bet.get("category") == packet.get("category")
         same_side = bet.get("side") == candidate.get("side")
         same_thesis = bet.get("thesis_type") == candidate.get("thesis_type")
-        if overlap >= 5 and same_side and (same_category or same_thesis):
+        same_semantic_key = bool(identity["semantic_key"] and other_semantic_key and identity["semantic_key"] == other_semantic_key)
+        strong_overlap = overlap >= 8
+        very_strong_overlap = overlap >= 10
+        semantically_same_trade = same_side and same_semantic_key and overlap >= 4
+        near_identical_surface = same_side and same_category and same_thesis and strong_overlap
+        broad_clone = same_side and very_strong_overlap and (same_category or same_thesis)
+        if semantically_same_trade or near_identical_surface or broad_clone:
+            logger.info(
+                "Duplicate overlap blocked market_id=%s against=%s overlap=%s same_semantic=%s same_category=%s same_thesis=%s same_side=%s terms=%s",
+                candidate.get("market_id"),
+                bet.get("market_id"),
+                overlap,
+                same_semantic_key,
+                same_category,
+                same_thesis,
+                same_side,
+                ",".join(overlap_terms[:8]),
+            )
             return True, "duplicate_semantic_overlap"
+        if overlap >= 5 and same_side and (same_category or same_thesis):
+            logger.info(
+                "Duplicate overlap allowed market_id=%s against=%s overlap=%s same_semantic=%s same_category=%s same_thesis=%s same_side=%s terms=%s",
+                candidate.get("market_id"),
+                bet.get("market_id"),
+                overlap,
+                same_semantic_key,
+                same_category,
+                same_thesis,
+                same_side,
+                ",".join(overlap_terms[:8]),
+            )
     return False, "ok"
 
 
@@ -2922,7 +2982,7 @@ def runner_status():
 @app.route("/runner-start", methods=["POST"])
 def runner_start():
     set_runner_enabled(True)
-    started = start_background_loops() or claim_runner_leader(force=True)
+    started = ensure_runner_autonomous(reason="manual_start") or claim_runner_leader(force=True)
     heartbeat_runner(force_claim=True)
     return jsonify({"ok": True, "started": bool(started), "message": "Runner habilitado.", "runner": build_runner_status()})
 
@@ -2938,9 +2998,9 @@ def runner_stop():
 def runner_restart():
     set_runner_enabled(True)
     release_cycle_lock()
+    started = ensure_runner_autonomous(reason="manual_restart")
     claim_runner_leader(force=True)
     heartbeat_runner(force_claim=True)
-    started = start_background_loops()
     return jsonify({"ok": True, "started": bool(started), "message": "Runner reiniciado.", "runner": build_runner_status()})
 
 
@@ -3168,21 +3228,77 @@ def monitor_loop():
             logger.exception("monitor_loop failed")
 
 
-def start_background_loops():
-    global BACKGROUND_LOOPS_STARTED
-    if not ENABLE_BACKGROUND_LOOPS:
-        logger.info("Background loops disabled; set ENABLE_BACKGROUND_LOOPS=true to enable them")
+def watchdog_loop():
+    while True:
+        try:
+            ensure_runner_autonomous(reason="watchdog")
+            time.sleep(RUNNER_WATCHDOG_INTERVAL_SECONDS)
+        except Exception:
+            logger.exception("runner watchdog failed")
+            time.sleep(RUNNER_WATCHDOG_INTERVAL_SECONDS)
+
+
+def record_runner_autostart(reason, recovered=False):
+    now_iso = to_iso(utc_now())
+    payload = {
+        "runner_last_autostart_at": now_iso,
+        "runner_last_autostart_reason": reason,
+    }
+    if recovered:
+        payload["runner_auto_recovered_at"] = now_iso
+        payload["runner_auto_recovered_reason"] = reason
+        payload["runner_auto_recovery_count"] = int(get_state("runner_auto_recovery_count", 0)) + 1
+    set_state_values(payload)
+
+
+def ensure_runner_autonomous(reason="autostart"):
+    global BACKGROUND_LOOPS_STARTED, BET_LOOP_THREAD, MONITOR_LOOP_THREAD, RUNNER_WATCHDOG_THREAD
+    if not should_run_background_loops():
         return False
+    recovered = False
     with BACKGROUND_LOOPS_LOCK:
-        if BACKGROUND_LOOPS_STARTED:
-            return False
-        set_runner_enabled(True)
-        claim_runner_leader(force=True)
-        heartbeat_runner(force_claim=True)
-        threading.Thread(target=bet_loop, daemon=True, name="bet-loop").start()
-        threading.Thread(target=monitor_loop, daemon=True, name="monitor-loop").start()
-        BACKGROUND_LOOPS_STARTED = True
-        return True
+        if not is_runner_enabled():
+            logger.warning("Runner enabled flag was false; auto-recovering it reason=%s", reason)
+            set_runner_enabled(True)
+            recovered = True
+        bet_alive = BET_LOOP_THREAD is not None and BET_LOOP_THREAD.is_alive()
+        monitor_alive = MONITOR_LOOP_THREAD is not None and MONITOR_LOOP_THREAD.is_alive()
+        watchdog_alive = RUNNER_WATCHDOG_THREAD is not None and RUNNER_WATCHDOG_THREAD.is_alive()
+        if not bet_alive:
+            BET_LOOP_THREAD = threading.Thread(target=bet_loop, daemon=True, name="bet-loop")
+            BET_LOOP_THREAD.start()
+            recovered = True
+        if not monitor_alive:
+            MONITOR_LOOP_THREAD = threading.Thread(target=monitor_loop, daemon=True, name="monitor-loop")
+            MONITOR_LOOP_THREAD.start()
+            recovered = True
+        if not watchdog_alive:
+            RUNNER_WATCHDOG_THREAD = threading.Thread(target=watchdog_loop, daemon=True, name="runner-watchdog")
+            RUNNER_WATCHDOG_THREAD.start()
+            recovered = True
+        if recovered:
+            claim_runner_leader(force=True)
+            heartbeat_runner(force_claim=True)
+            BACKGROUND_LOOPS_STARTED = True
+            recovery_reason = f"{reason}:{'recovered' if bet_alive or monitor_alive or watchdog_alive else 'autostart'}"
+            record_runner_autostart(recovery_reason, recovered=True)
+            logger.info(
+                "Runner autonomous start/recovery completed reason=%s bet_alive_before=%s monitor_alive_before=%s watchdog_alive_before=%s",
+                reason,
+                bet_alive,
+                monitor_alive,
+                watchdog_alive,
+            )
+        elif not BACKGROUND_LOOPS_STARTED:
+            BACKGROUND_LOOPS_STARTED = True
+    return recovered
+
+
+def start_background_loops():
+    if not should_run_background_loops():
+        logger.info("Background loops disabled by config")
+        return False
+    return ensure_runner_autonomous(reason="start_background_loops")
 
 # ── DASHBOARD / MISC ENDPOINTS ───────────────────────────────
 HTML = """<!DOCTYPE html>
@@ -3397,7 +3513,7 @@ function setValue(id,text,raw){const el=document.getElementById(id);el.textConte
 function renderTradeCard(b){return `<div class='trade-card'><div class='trade-top'><div><div class='trade-q'>${b.question}</div><div class='badge-row'><span class='badge ${b.trade_class}'>${bucketLabel(b.trade_class)}</span><span class='badge'>${b.tier}</span><span class='badge'>${b.horizon_bucket||'—'}</span><span class='badge'>${b.category}</span>${b.obvious_trade_override?"<span class='badge'>obvious</span>":""}</div></div><div class='badge'>${b.status_text}</div></div><div class='trade-grid'><div class='meta-box'><span>Posición</span><strong>${b.side} · ${money(b.amount)}</strong></div><div class='meta-box'><span>PnL</span><strong class='${metricClass(b.pnl||0)}'>${b.pnl_text}</strong></div><div class='meta-box'><span>Entry / Current</span><strong>${b.price_entry||0} / ${b.price_current||0}</strong></div><div class='meta-box'><span>Edge / Confidence</span><strong>${b.edge}pp · ${b.confidence}/10</strong></div><div class='meta-box'><span>Reliability / Ease</span><strong>${b.reliability}% · ${b.ease_of_win}%</strong></div><div class='meta-box'><span>Priority / Rank</span><strong>${b.portfolio_priority_score}% · ${b.relative_rank_score||0}%</strong></div></div><div class='trade-foot'><strong>Señal clave:</strong> ${b.key_signal||'—'}<br><strong>Invalidación:</strong> ${b.invalidation_condition||'—'}<br><strong>Racional:</strong> ${b.reasoning||'—'}</div></div>`}
 function renderWatchCard(item){return `<div class='watch-card'><div class='watch-top'><div><div class='watch-q'>${item.question}</div><div class='badge-row'><span class='badge ${item.trade_class||'watch'}'>${bucketLabel(item.trade_class||'watchlist')}</span><span class='badge'>${item.tier||'—'}</span><span class='badge'>${item.horizon_bucket||'—'}</span>${item.obvious_trade_override?"<span class='badge'>obvious</span>":""}</div></div></div><div class='trade-grid'><div class='meta-box'><span>Priority</span><strong>${Math.round((item.portfolio_priority_score||0)*100)}%</strong></div><div class='meta-box'><span>Opportunity</span><strong>${Math.round((item.opportunity_score||0)*100)}%</strong></div><div class='meta-box'><span>Reliability</span><strong>${Math.round((item.reliability||0)*100)}%</strong></div><div class='meta-box'><span>Learnability / Ease</span><strong>${Math.round((item.learnability||0)*100)}% · ${Math.round((item.ease_of_win||0)*100)}%</strong></div></div><div class='watch-foot'>${item.reason||'Necesita un poco más de prioridad o espacio en portfolio antes de entrar.'}</div></div>`}
 
-async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Strategy: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Bankroll inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Legacy archivado: ${d.legacy_trades_archived||0}`;document.getElementById('runner-pill').textContent=`Runner: ${titleCase(d.runner_health_state||'unknown')}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.7?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*18 + (1-Math.abs((d.portfolio_exposure||0)-0.48))*16 + Math.min((d.positions_per_cycle_last||0)/16,1)*18 + Math.min((d.trades_last_hour||0)/8,1)*12 + Math.min((d.coverage_breadth||0)/8,1)*16 + ((d.runner_health_state||'stale')==='healthy'?20:(d.runner_health_state||'stale')==='delayed'?10:0)));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`${d.runner_summary||'Sin estado de runner.'} Capital libre ${money(d.capital_free)} · comprometido ${money(d.capital_committed)} · ${d.open_current_lab||0} trades abiertos · ${d.trades_last_hour||0} trades en la última hora · ${d.cycles_last_hour||0} ciclos en la última hora.`;document.getElementById('perf-summary').innerHTML=`PnL total <strong>${money(d.total_pnl)}</strong>. Realizado <strong>${money(d.realized_pnl)}</strong>, unrealized <strong>${money(d.unrealized_pnl)}</strong>. Hold medio <strong>${d.average_hold_time_hours||0}h</strong> y feedback temprano en <strong>${d.early_feedback_pct||0}%</strong> de los trades cerrados.`;document.getElementById('runner-summary').innerHTML=`Health: <strong>${titleCase(d.runner_health_state||'unknown')}</strong><br>Último heartbeat: <strong>${timeAgo(d.runner_last_heartbeat)}</strong><br>Último ciclo iniciado: <strong>${timeAgo(d.last_cycle_started_at)}</strong><br>Último ciclo terminado: <strong>${timeAgo(d.last_cycle_finished_at)}</strong><br>Último ciclo exitoso: <strong>${timeAgo(d.last_successful_cycle_at)}</strong><br>Status último ciclo: <strong>${titleCase(d.last_cycle_status||'never')}</strong><br>Duración último ciclo: <strong>${Math.round((d.last_cycle_duration_ms||0)/1000)}s</strong><br>Counts último ciclo: <strong>${d.last_cycle_analyzed||0}</strong> analyzed / <strong>${d.last_cycle_shortlist||0}</strong> shortlist / <strong>${d.last_cycle_selected||0}</strong> selected / <strong>${d.last_cycle_watchlist||0}</strong> watchlist / <strong>${d.last_cycle_rejected||0}</strong> rejected<br>Ciclos última hora: <strong>${d.cycles_last_hour||0}</strong> · Trades abiertos última hora: <strong>${d.trades_last_hour||0}</strong>${d.last_cycle_error?`<br>Último error: <strong>${d.last_cycle_error}</strong>`:''}`;document.getElementById('mix-summary').innerHTML=`Counts por bucket:<br>${objectLines(d.open_count_by_bucket,'Todavía no hay trades abiertos.')}<br><br>Capital por bucket:<br>${objectLines(d.open_amount_by_bucket,'Todavía no hay capital desplegado.')}<br><br>Average size por bucket:<br>${objectLines(d.average_size_by_bucket,'Todavía no hay tamaños para resumir.')}<br><br>Priority media por bucket:<br>${objectLines(d.average_priority_by_bucket,'Sin quality summary todavía.')}<br><br>Exposure por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Exposure por horizon:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay posiciones abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Winrate por bucket:<br>${objectLines(d.winrate_core_vs_exploratory,'Aún no hay historial suficiente.')}<br><br>Winrate por learning velocity:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Winrate por time bucket:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay buckets suficientes.')}<br><br>Obvious trades último ciclo: <strong>${d.obvious_trades_last_cycle||0}</strong>`;document.getElementById('pattern-summary').innerHTML=`Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}<br>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>PnL por bucket:<br>${objectLines(d.pnl_by_trade_class,'Todavía no hay PnL por bucket.')}<br><br>Performance obvious vs non-obvious:<br>${objectLines(d.performance_by_obviousness,'Todavía no hay suficiente historial.')}`;document.getElementById('debug-summary').innerHTML=`Leader actual: <strong>${d.runner_leader_id||'—'}</strong><br>Legacy archivados: <strong>${d.legacy_trades_archived||0}</strong><br>Descartados por evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartados por correlación/exposure: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Selected / watchlist / rejected: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong><br>Trades última hora: <strong>${d.trades_last_hour||0}</strong> · Ciclos última hora: <strong>${d.cycles_last_hour||0}</strong>`}
+async function loadMetrics(){const d=await fetch('/metrics').then(r=>r.json());document.getElementById('lab-pill').textContent=`Lab activo: ${d.current_lab_epoch||'—'}`;document.getElementById('strategy-pill').textContent=`Strategy: ${d.current_strategy_version||'—'}`;document.getElementById('bankroll-pill').textContent=`Bankroll inicial: ${money(d.paper_starting_balance)}`;document.getElementById('legacy-pill').textContent=`Legacy archivado: ${d.legacy_trades_archived||0}`;document.getElementById('runner-pill').textContent=`Runner: ${titleCase(d.runner_health_state||'unknown')}`;setValue('capital-free',money(d.capital_free),d.capital_free);setValue('capital-committed',money(d.capital_committed),-d.capital_committed);setValue('portfolio-exposure',pct(d.portfolio_exposure),(d.portfolio_exposure||0)<0.7?1:-1);setValue('total-pnl',(d.total_pnl>=0?'+':'')+Math.round(d.total_pnl||0),d.total_pnl||0);document.getElementById('open-trades').textContent=d.open_current_lab||0;document.getElementById('core-exp').textContent=`${d.core_open||0} / ${d.secondary_open||0} / ${d.experimental_open||0}`;document.getElementById('cycle-stats').textContent=`${d.markets_analyzed_last_cycle||0} / ${d.positions_per_cycle_last||0}`;document.getElementById('watchlist-count').textContent=d.watchlist_last_cycle||0;const health=Math.min(100,Math.round((1-(d.overlap_concentration||0))*18 + (1-Math.abs((d.portfolio_exposure||0)-0.48))*16 + Math.min((d.positions_per_cycle_last||0)/16,1)*18 + Math.min((d.trades_last_hour||0)/8,1)*12 + Math.min((d.coverage_breadth||0)/8,1)*16 + ((d.runner_health_state||'stale')==='healthy'?20:(d.runner_health_state||'stale')==='delayed'?10:0)));setValue('health-score',health+'%',health-50);document.getElementById('health-summary').textContent=`${d.runner_summary||'Sin estado de runner.'} Capital libre ${money(d.capital_free)} · comprometido ${money(d.capital_committed)} · ${d.open_current_lab||0} trades abiertos · ${d.trades_last_hour||0} trades en la última hora · ${d.cycles_last_hour||0} ciclos en la última hora.`;document.getElementById('perf-summary').innerHTML=`PnL total <strong>${money(d.total_pnl)}</strong>. Realizado <strong>${money(d.realized_pnl)}</strong>, unrealized <strong>${money(d.unrealized_pnl)}</strong>. Hold medio <strong>${d.average_hold_time_hours||0}h</strong> y feedback temprano en <strong>${d.early_feedback_pct||0}%</strong> de los trades cerrados.`;document.getElementById('runner-summary').innerHTML=`Health: <strong>${titleCase(d.runner_health_state||'unknown')}</strong><br>Autónomo: <strong>${d.runner_autonomous?'sí':'no'}</strong><br>Último heartbeat: <strong>${timeAgo(d.runner_last_heartbeat)}</strong><br>Último ciclo iniciado: <strong>${timeAgo(d.last_cycle_started_at)}</strong><br>Último ciclo terminado: <strong>${timeAgo(d.last_cycle_finished_at)}</strong><br>Último ciclo exitoso: <strong>${timeAgo(d.last_successful_cycle_at)}</strong><br>Status último ciclo: <strong>${titleCase(d.last_cycle_status||'never')}</strong><br>Duración último ciclo: <strong>${Math.round((d.last_cycle_duration_ms||0)/1000)}s</strong><br>Counts último ciclo: <strong>${d.last_cycle_analyzed||0}</strong> analyzed / <strong>${d.last_cycle_shortlist||0}</strong> shortlist / <strong>${d.last_cycle_selected||0}</strong> selected / <strong>${d.last_cycle_watchlist||0}</strong> watchlist / <strong>${d.last_cycle_rejected||0}</strong> rejected<br>Ciclos última hora: <strong>${d.cycles_last_hour||0}</strong> · Trades abiertos última hora: <strong>${d.trades_last_hour||0}</strong><br>Autostart: <strong>${timeAgo(d.runner_last_autostart_at)}</strong>${d.runner_last_autostart_reason?` (${d.runner_last_autostart_reason})`:''}<br>Auto-recovery: <strong>${timeAgo(d.runner_auto_recovered_at)}</strong>${d.runner_auto_recovered_reason?` (${d.runner_auto_recovered_reason})`:''} · count <strong>${d.runner_auto_recovery_count||0}</strong>${d.last_cycle_error?`<br>Último error: <strong>${d.last_cycle_error}</strong>`:''}`;document.getElementById('mix-summary').innerHTML=`Counts por bucket:<br>${objectLines(d.open_count_by_bucket,'Todavía no hay trades abiertos.')}<br><br>Capital por bucket:<br>${objectLines(d.open_amount_by_bucket,'Todavía no hay capital desplegado.')}<br><br>Average size por bucket:<br>${objectLines(d.average_size_by_bucket,'Todavía no hay tamaños para resumir.')}<br><br>Priority media por bucket:<br>${objectLines(d.average_priority_by_bucket,'Sin quality summary todavía.')}<br><br>Exposure por categoría:<br>${objectLines(d.portfolio_exposure_by_category,'Todavía no hay exposición activa.')}<br><br>Exposure por horizon:<br>${objectLines(d.portfolio_exposure_by_horizon,'Todavía no hay posiciones abiertas.')}`;document.getElementById('learning-summary').innerHTML=`Winrate por bucket:<br>${objectLines(d.winrate_core_vs_exploratory,'Aún no hay historial suficiente.')}<br><br>Winrate por learning velocity:<br>${objectLines(d.winrate_by_learning_velocity,'Aún no hay historial suficiente.')}<br><br>Winrate por time bucket:<br>${objectLines(d.winrate_by_time_to_resolution_bucket,'Aún no hay buckets suficientes.')}<br><br>Obvious trades último ciclo: <strong>${d.obvious_trades_last_cycle||0}</strong>`;document.getElementById('pattern-summary').innerHTML=`Top winning patterns: ${JSON.stringify(d.top_winning_patterns||[])}<br>Top losing patterns: ${JSON.stringify(d.top_losing_patterns||[])}<br><br>PnL por bucket:<br>${objectLines(d.pnl_by_trade_class,'Todavía no hay PnL por bucket.')}<br><br>Performance obvious vs non-obvious:<br>${objectLines(d.performance_by_obviousness,'Todavía no hay suficiente historial.')}`;document.getElementById('debug-summary').innerHTML=`Leader actual: <strong>${d.runner_leader_id||'—'}</strong><br>Autostart reason: <strong>${d.runner_last_autostart_reason||'—'}</strong><br>Auto-recovery reason: <strong>${d.runner_auto_recovered_reason||'—'}</strong><br>Legacy archivados: <strong>${d.legacy_trades_archived||0}</strong><br>Descartados por evidencia: <strong>${d.discarded_low_evidence_last_cycle||0}</strong><br>Descartados por correlación/exposure: <strong>${d.discarded_correlation_last_cycle||0}</strong><br>Selected / watchlist / rejected: <strong>${(d.selection_mix_last_cycle||{}).selected||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).watchlist||0}</strong> / <strong>${(d.selection_mix_last_cycle||{}).rejected||0}</strong><br>Trades última hora: <strong>${d.trades_last_hour||0}</strong> · Ciclos última hora: <strong>${d.cycles_last_hour||0}</strong>`}
 async function loadCycle(){const d=await fetch('/candidate-scores').then(r=>r.json());const runner=await fetch('/runner-status').then(r=>r.json());const s=d.summary||{};document.getElementById('cycle-message').textContent=s.headline||'Todavía no hay resumen del último ciclo.';document.getElementById('cycle-analyzed').textContent=s.analyzed||0;document.getElementById('cycle-shortlist').textContent=s.shortlist||0;document.getElementById('cycle-selected').textContent=s.selected||0;document.getElementById('cycle-watchlist').textContent=s.watchlist||0;document.getElementById('cycle-rejected').textContent=s.rejected||0;document.getElementById('cycle-mix').innerHTML=`<div class='metric-item'><span>Core</span><strong>${s.core_selected||0}</strong></div><div class='metric-item'><span>Secondary</span><strong>${s.secondary_selected||0}</strong></div><div class='metric-item'><span>Exploratory</span><strong>${s.exploratory_selected||0}</strong></div><div class='metric-item'><span>Obvious overrides</span><strong>${s.obvious_selected||0}</strong></div>`;const blockers=Object.entries(d.blockers||{});document.getElementById('blockers').innerHTML=blockers.length?blockers.map(([k,v])=>`<div class='reason-item'><span>${titleCase(k)}</span><strong>${v}</strong></div>`).join(''):"<div class='reason-item'><span>No hubo bloqueos relevantes en el último ciclo.</span><strong>OK</strong></div>";document.getElementById('watchlist').innerHTML=(d.watchlist||[]).length?(d.watchlist||[]).slice(0,8).map(renderWatchCard).join(''):"<div class='empty'>No hay candidatos en watchlist en este ciclo.</div>";document.getElementById('live-tag').textContent=(runner.runner_health_state||'stale')==='healthy'?'Runner healthy':(runner.runner_health_state||'stale')==='delayed'?'Runner delayed':'Runner stale';document.getElementById('bot-status').textContent=(runner.runner_health_state||'stale')==='healthy'?'Runner activo':(runner.runner_health_state||'stale')==='delayed'?'Runner demorado':'Runner stale';document.getElementById('bot-reasoning').textContent=runner.runner_summary||s.headline||'Todavía no hay actividad reciente suficiente.'}
 async function loadBets(){const d=await fetch('/bets').then(r=>r.json());document.getElementById('bets').innerHTML=d.length?d.map(renderTradeCard).join(''):"<div class='empty'>Todavía no hay trades en este laboratorio.</div>"}
 async function runCycle(){document.getElementById('bot-status').textContent='Corriendo ciclo';document.getElementById('bot-reasoning').textContent='Investigando mercados, armando ranking y evaluando entradas.';const d=await fetch('/bot-bet',{method:'POST'}).then(r=>r.json());document.getElementById('bot-status').textContent=d.placed?'Bot operando':'Bot en espera';document.getElementById('bot-reasoning').textContent=d.message||d.reasoning||'';await loadAll()}
@@ -3415,6 +3531,12 @@ loadAll();setInterval(loadAll,12000)
 @app.route("/")
 def index():
     return render_template_string(HTML)
+
+
+@app.before_request
+def keep_runner_autonomous():
+    if should_run_background_loops():
+        ensure_runner_autonomous(reason="request_self_heal")
 
 
 @app.route("/setup-db")
@@ -3517,12 +3639,12 @@ def test_wiki():
     return jsonify(fetch_wikipedia_source("Will Viktor Orban remain Prime Minister of Hungary"))
 
 
-# Safe autostart: multiple web workers may import this module, so the runner
-# uses a persisted leader lease + cycle lock to avoid duplicate execution.
-if ENABLE_BACKGROUND_LOOPS:
-    start_background_loops()
+# Safe autonomous autostart: multiple web workers may import this module, so
+# the runner uses a persisted leader lease + cycle lock to avoid duplicates.
+if should_run_background_loops():
+    ensure_runner_autonomous(reason="module_import")
 
 
 if __name__ == "__main__":
-    start_background_loops()
+    ensure_runner_autonomous(reason="main_start")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
