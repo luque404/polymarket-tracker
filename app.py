@@ -57,7 +57,7 @@ RUNNER_LEASE_SECONDS = int(os.environ.get("RUNNER_LEASE_SECONDS", str(max(180, B
 RUNNER_STALE_AFTER_SECONDS = int(os.environ.get("RUNNER_STALE_AFTER_SECONDS", str(max(600, BET_LOOP_INTERVAL_SECONDS * 4))))
 RUNNER_CYCLE_LOCK_TIMEOUT_SECONDS = int(os.environ.get("RUNNER_CYCLE_LOCK_TIMEOUT_SECONDS", str(max(300, BET_LOOP_INTERVAL_SECONDS * 4))))
 RUNNER_WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("RUNNER_WATCHDOG_INTERVAL_SECONDS", "30"))
-MARKETS_FETCH_LIMIT = 500
+MARKETS_FETCH_LIMIT = 1000
 MARKETS_PREVIEW_LIMIT = 20
 MAX_OPEN_BETS = 140
 MAX_POSITIONS_PER_CYCLE = 24
@@ -68,11 +68,11 @@ MAX_TOTAL_EXPOSURE_PCT = 0.85
 MAX_CATEGORY_EXPOSURE_PCT = 0.20
 MAX_SIDE_EXPOSURE_PCT = 0.42
 MAX_THESIS_EXPOSURE_PCT = 0.20
-MIN_MARKET_PROB = 0.08
-MAX_MARKET_PROB = 0.92
-MIN_MARKET_VOLUME = 20
-MAX_DAYS_TO_RESOLUTION = 365
-MIN_DAYS_TO_RESOLUTION = 1
+MIN_MARKET_PROB = 0.03
+MAX_MARKET_PROB = 0.97
+MIN_MARKET_VOLUME = 5
+MAX_DAYS_TO_RESOLUTION = 730
+MIN_DAYS_TO_RESOLUTION = 0
 MIN_COMPOUND_SCORE = 0.42
 MIN_EDGE_TO_BET = 0.04
 MIN_CONFIDENCE_TO_BET = 4
@@ -89,10 +89,10 @@ LONG_DATED_PENALTY_START_DAYS = 75
 FAST_FEEDBACK_DAYS = 28
 POLYMARKET_FEE_HAIRCUT = 0.95
 WATCHLIST_LIMIT = 20
-TIER_A_SCORE_FLOOR = 0.61
-TIER_B_SCORE_FLOOR = 0.44
-TIER_C_SCORE_FLOOR = 0.26
-OBVIOUS_ENOUGH_SCORE = 0.38
+TIER_A_SCORE_FLOOR = 0.58
+TIER_B_SCORE_FLOOR = 0.38
+TIER_C_SCORE_FLOOR = 0.20
+OBVIOUS_ENOUGH_SCORE = 0.34
 CORE_BUDGET_PCT = 0.32
 SECONDARY_BUDGET_PCT = 0.30
 EXPLORATORY_BUDGET_PCT = 0.18
@@ -1414,32 +1414,30 @@ def compute_market_learnability_score(packet):
 
 def detect_market_supported(market, now_utc):
     if not market.get("active") or market.get("closed"):
-        return False, None
-    question = normalize_question(market.get("question", ""))
-    tags = " ".join(tag.get("slug", "") for tag in market.get("tags", []))
-    if any(term in (question + " " + tags).lower() for term in SPORTS_FILTER):
-        return False, None
+        return False, None, "inactive_or_closed"
     prob = get_yes_probability(market)
     volume = safe_float(market.get("volume", 0))
     if not (MIN_MARKET_PROB < prob < MAX_MARKET_PROB):
-        return False, None
+        return False, None, "probability_out_of_range"
     if volume < MIN_MARKET_VOLUME:
-        return False, None
+        return False, None, "volume_too_low"
     end_date = iso_to_datetime(market.get("endDate", market.get("end_date", "")))
     if end_date:
         days_left = (end_date - now_utc).days
         if days_left > MAX_DAYS_TO_RESOLUTION or days_left < MIN_DAYS_TO_RESOLUTION:
-            return False, None
+            return False, None, "days_to_resolution_out_of_range"
         market["days_left"] = days_left
     else:
         market["days_left"] = MAX_DAYS_TO_RESOLUTION
-    return True, prob
+    return True, prob, "ok"
 
 
 def fetch_active_markets(limit=MARKETS_FETCH_LIMIT):
     response = requests.get(f"{GAMMA_API}/markets?closed=false&limit={limit}", timeout=REQUEST_TIMEOUT)
     payload = response.json()
-    return payload if isinstance(payload, list) else payload.get("markets", [])
+    markets = payload if isinstance(payload, list) else payload.get("markets", [])
+    logger.info("Market source fetched count=%s limit=%s", len(markets), limit)
+    return markets
 
 
 def fetch_orderbook(market_id):
@@ -1790,11 +1788,11 @@ def compute_capital_efficiency_score(candidate):
 
 
 def classify_trade_class(reliability, opportunity_score, learning_velocity_score, ease_of_win_score):
-    if reliability >= 0.58 and opportunity_score >= 0.52 and ease_of_win_score >= 0.56:
+    if reliability >= 0.52 and opportunity_score >= 0.46 and ease_of_win_score >= 0.50:
         return "core"
-    if reliability >= 0.31 and opportunity_score >= 0.33:
+    if reliability >= 0.26 and opportunity_score >= 0.28:
         return "secondary"
-    if learning_velocity_score >= 0.20 or opportunity_score >= 0.24 or ease_of_win_score >= 0.34:
+    if learning_velocity_score >= 0.14 or opportunity_score >= 0.18 or ease_of_win_score >= 0.28:
         return "experimental"
     return "skip"
 
@@ -1806,13 +1804,13 @@ def assign_candidate_tier(candidate):
     learning_velocity = candidate.get("learning_velocity_score", 0.0)
     edge = candidate.get("edge", 0.0)
     score = candidate.get("portfolio_priority_score", candidate.get("compound_score", 0.0))
-    if score >= TIER_A_SCORE_FLOOR and reliability >= 0.58 and ease_of_win >= 0.52:
+    if score >= TIER_A_SCORE_FLOOR and reliability >= 0.50 and ease_of_win >= 0.48:
         return "TIER_A"
-    if score >= TIER_B_SCORE_FLOOR and reliability >= 0.34 and opportunity >= 0.32:
+    if score >= TIER_B_SCORE_FLOOR and reliability >= 0.28 and opportunity >= 0.26:
         return "TIER_B"
-    if score >= TIER_C_SCORE_FLOOR and (learning_velocity >= 0.20 or opportunity >= 0.24 or ease_of_win >= 0.42):
+    if score >= TIER_C_SCORE_FLOOR and (learning_velocity >= 0.14 or opportunity >= 0.18 or ease_of_win >= 0.28):
         return "TIER_C"
-    if edge >= 0.05 and (opportunity >= 0.20 or ease_of_win >= 0.38 or learning_velocity >= 0.26):
+    if edge >= 0.035 and (opportunity >= 0.16 or ease_of_win >= 0.26 or learning_velocity >= 0.18):
         return "TIER_C"
     return "TIER_D"
 
@@ -2153,14 +2151,17 @@ def fast_prefilter(candidates):
     if not candidates:
         return []
     ranked = sorted(candidates, key=lambda item: item["prefilter_score"], reverse=True)
-    heuristic_top = ranked[:22]
+    heuristic_top = ranked[:60]
     if not ANTHROPIC_API_KEY:
-        return heuristic_top[:16]
+        logger.info("Fast prefilter heuristic_only input=%s output=%s", len(candidates), min(len(heuristic_top), 40))
+        return heuristic_top[:40]
     try:
-        market_lines = "\n".join([f"{idx + 1}. {item['question']} | cat={item['packet']['category']} | vol={round(item['packet']['volume'])} | spread={round(item['packet']['spread'] * 100, 2)}% | mispricing={round(item['packet']['mispricing_score'] * 100)} | learn_vel={round(item['packet']['learning_velocity_score'] * 100)} | signal_q={round(item['packet']['source_quality_score'] * 100)}" for idx, item in enumerate(ranked[:28])])
+        prefilter_pool = ranked[:60]
+        market_lines = "\n".join([f"{idx + 1}. {item['question']} | cat={item['packet']['category']} | vol={round(item['packet']['volume'])} | spread={round(item['packet']['spread'] * 100, 2)}% | mispricing={round(item['packet']['mispricing_score'] * 100)} | learn_vel={round(item['packet']['learning_velocity_score'] * 100)} | signal_q={round(item['packet']['source_quality_score'] * 100)}" for idx, item in enumerate(prefilter_pool)])
         prompt = f"""Eres un prefilter de ideas para un portfolio de paper trading en Polymarket.
 {get_performance_context()}
-Selecciona hasta 16 ids con mejor potencial de mispricing ajustado por calidad de evidencia, liquidez, learning velocity y diversificación.
+Selecciona hasta 40 ids con mejor potencial de mispricing ajustado por calidad de evidencia, liquidez, learning velocity y diversificación.
+Prefiere dejar pasar oportunidades razonables antes que recortar demasiado temprano.
 Descarta mercados con mala evidencia o demasiado ruido.
 Devuelve solo JSON con formato {{"top":[1,2,3]}}.
 
@@ -2168,12 +2169,15 @@ Mercados:
 {market_lines}
 """
         parsed = call_claude_json(FAST_MODEL, prompt, max_tokens=140)
-        indices = [index - 1 for index in parsed.get("top", []) if 1 <= index <= len(ranked[:28])]
+        indices = [index - 1 for index in parsed.get("top", []) if 1 <= index <= len(prefilter_pool)]
         if indices:
-            return [ranked[index] for index in indices[:16]]
+            picked = [prefilter_pool[index] for index in indices[:40]]
+            logger.info("Fast prefilter model input=%s output=%s", len(candidates), len(picked))
+            return picked
     except Exception:
         logger.exception("Fast prefilter failed")
-    return heuristic_top[:16]
+    logger.info("Fast prefilter fallback input=%s output=%s", len(candidates), min(len(heuristic_top), 40))
+    return heuristic_top[:40]
 
 
 def analyze_candidate(candidate, all_bets):
@@ -2491,17 +2495,17 @@ def select_portfolio(candidates, snapshot):
         reliability = candidate.get("conclusion_reliability_score", 0.0)
         ease = candidate.get("ease_of_win_score", 0.0)
         learn = candidate.get("learning_velocity_score", 0.0)
-        if trade_class == "skip" and edge >= 0.035 and (
-            opportunity >= 0.32
-            or ease >= 0.36
-            or learn >= 0.28
+        if trade_class == "skip" and edge >= 0.028 and (
+            opportunity >= 0.24
+            or ease >= 0.28
+            or learn >= 0.20
         ):
             rescued_from_tier_skip = True
             candidate["trade_class"] = trade_class = "experimental" if reliability < 0.32 else "secondary"
         if tier == "TIER_D" and (
             opportunity >= 0.60
-            or (trade_class in ("secondary", "experimental") and edge >= 0.035)
-            or (edge >= 0.05 and (ease >= 0.38 or learn >= 0.30))
+            or (trade_class in ("secondary", "experimental") and edge >= 0.028)
+            or (edge >= 0.04 and (ease >= 0.30 or learn >= 0.22))
         ):
             rescued_from_tier_skip = True
             candidate["tier"] = tier = "TIER_C"
@@ -2518,7 +2522,7 @@ def select_portfolio(candidates, snapshot):
                 trade_class,
                 tier,
             )
-        hard_bad_opportunity = edge < 0.025 and opportunity < 0.22 and ease < 0.30 and learn < 0.22
+        hard_bad_opportunity = edge < 0.018 and opportunity < 0.16 and ease < 0.22 and learn < 0.14
         if trade_class == "skip" or (tier == "TIER_D" and hard_bad_opportunity):
             logger.info(
                 "Tier skip blocked market_id=%s edge=%.4f priority=%.4f reliability=%.4f opportunity=%.4f ease=%.4f learn=%.4f trade_class=%s tier=%s rescued=%s",
@@ -2535,7 +2539,7 @@ def select_portfolio(candidates, snapshot):
             )
             rejected.append((candidate, "tier_skip"))
             continue
-        if candidate["analysis"].get("take_now_vs_watchlist") == "watchlist" and len(watchlist) < WATCHLIST_LIMIT and not obvious_override and candidate.get("portfolio_priority_score", 0.0) < floor + 0.06:
+        if candidate["analysis"].get("take_now_vs_watchlist") == "watchlist" and len(watchlist) < WATCHLIST_LIMIT and not obvious_override and candidate.get("portfolio_priority_score", 0.0) < floor + 0.10:
             candidate["selection_bucket"] = "watchlist_high_potential"
             watchlist.append(candidate)
             continue
@@ -2795,26 +2799,64 @@ def run_bot_cycle(cycle_id=None):
     open_bets = get_open_bets(all_bets)
     now_utc = datetime.now(timezone.utc)
     candidates = []
+    seen_by_category = Counter()
+    accepted_by_category = Counter()
+    support_rejections = Counter()
+    skipped_open_duplicates = 0
     for market in markets:
         try:
-            supported, market_prob = detect_market_supported(market, now_utc)
+            raw_question = normalize_question(market.get("question", ""))
+            seen_by_category[detect_category(raw_question)] += 1
+            supported, market_prob, support_reason = detect_market_supported(market, now_utc)
             if not supported:
+                support_rejections[support_reason] += 1
                 continue
-            question = normalize_question(market.get("question", ""))[:120]
+            question = raw_question[:120]
             if any(question == bet.get("question", "") for bet in open_bets):
+                skipped_open_duplicates += 1
                 continue
             packet = build_research_packet(market, market_prob, markets, all_bets)
+            accepted_by_category[packet.get("category", "general")] += 1
             prefilter_score = clamp(packet["source_quality_score"] * 0.22 + packet["final_evidence_strength"] * 0.18 + packet["mispricing_score"] * 0.28 + packet["learning_velocity_score"] * 0.18 + packet["market_learnability_score"] * 0.10 + (packet["volume"] / 50000.0) * 0.12 - packet["uncertainty_score"] * 0.18, 0.0, 1.0)
             candidates.append({"question": question, "market_id": market.get("id", ""), "market": market, "packet": packet, "prefilter_score": round(prefilter_score, 4)})
         except Exception:
             logger.exception("Candidate build failed for market=%s", market.get("id", "?"))
 
+    logger.info(
+        "Market scan stages fetched=%s passed_support=%s skipped_open_duplicates=%s support_rejections=%s categories_seen=%s categories_passed_support=%s",
+        len(markets),
+        len(candidates),
+        skipped_open_duplicates,
+        dict(support_rejections),
+        dict(seen_by_category),
+        dict(accepted_by_category),
+    )
+
     shortlist = fast_prefilter(candidates)
+    logger.info(
+        "Market scan shortlist stage candidates=%s shortlist=%s anthropic_enabled=%s",
+        len(candidates),
+        len(shortlist),
+        bool(ANTHROPIC_API_KEY),
+    )
     snapshot = current_portfolio_snapshot(all_bets)
     analyzed = [compute_candidate_score(analyze_candidate(candidate, all_bets), open_bets) for candidate in shortlist]
     analyzed = apply_relative_ranks(analyzed)
     analyzed = rebalance_trade_mix(analyzed, snapshot)
+    analyzed_by_category = Counter(candidate["packet"].get("category", "general") for candidate in analyzed)
+    logger.info(
+        "Market scan final analysis stage analyzed=%s categories_analyzed=%s",
+        len(analyzed),
+        dict(analyzed_by_category),
+    )
     selected, watchlist, rejected = select_portfolio(analyzed, snapshot)
+    logger.info(
+        "Market scan selection stage analyzed=%s selected=%s watchlist=%s rejected=%s",
+        len(analyzed),
+        len(selected),
+        len(watchlist),
+        len(rejected),
+    )
     placed = []
     for candidate in selected:
         bet = place_bet_from_candidate(candidate, cycle_id)
@@ -3851,7 +3893,7 @@ def debug():
         examples = []
         for market in markets:
             try:
-                ok, prob = detect_market_supported(market, now_utc)
+                ok, prob, _ = detect_market_supported(market, now_utc)
                 if ok:
                     supported += 1
                     if len(examples) < 5:
