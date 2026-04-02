@@ -2384,38 +2384,49 @@ def select_portfolio(candidates, snapshot):
             rejected.append((candidate, "recently_evaluated"))
             continue
         rescued_from_tier_skip = False
-        if (trade_class == "skip" or tier == "TIER_D") and candidate.get("edge", 0.0) >= 0.05 and (
-            candidate.get("opportunity_score", 0.0) >= 0.20
-            or candidate.get("ease_of_win_score", 0.0) >= 0.38
-            or candidate.get("learning_velocity_score", 0.0) >= 0.26
+        edge = candidate.get("edge", 0.0)
+        opportunity = candidate.get("opportunity_score", 0.0)
+        reliability = candidate.get("conclusion_reliability_score", 0.0)
+        ease = candidate.get("ease_of_win_score", 0.0)
+        learn = candidate.get("learning_velocity_score", 0.0)
+        if trade_class == "skip" and edge >= 0.035 and (
+            opportunity >= 0.32
+            or ease >= 0.36
+            or learn >= 0.28
         ):
             rescued_from_tier_skip = True
-            if trade_class == "skip":
-                candidate["trade_class"] = trade_class = "experimental" if candidate.get("conclusion_reliability_score", 0.0) < 0.30 else "secondary"
-            if tier == "TIER_D":
-                candidate["tier"] = tier = "TIER_C"
+            candidate["trade_class"] = trade_class = "experimental" if reliability < 0.32 else "secondary"
+        if tier == "TIER_D" and (
+            opportunity >= 0.60
+            or (trade_class in ("secondary", "experimental") and edge >= 0.035)
+            or (edge >= 0.05 and (ease >= 0.38 or learn >= 0.30))
+        ):
+            rescued_from_tier_skip = True
+            candidate["tier"] = tier = "TIER_C"
+        if rescued_from_tier_skip:
             logger.info(
                 "Tier skip rescue market_id=%s edge=%.4f priority=%.4f reliability=%.4f opportunity=%.4f ease=%.4f learn=%.4f trade_class=%s tier=%s",
                 candidate.get("market_id"),
-                candidate.get("edge", 0.0),
+                edge,
                 candidate.get("portfolio_priority_score", 0.0),
-                candidate.get("conclusion_reliability_score", 0.0),
-                candidate.get("opportunity_score", 0.0),
-                candidate.get("ease_of_win_score", 0.0),
-                candidate.get("learning_velocity_score", 0.0),
+                reliability,
+                opportunity,
+                ease,
+                learn,
                 trade_class,
                 tier,
             )
-        if trade_class == "skip" or tier == "TIER_D":
+        hard_bad_opportunity = edge < 0.025 and opportunity < 0.22 and ease < 0.30 and learn < 0.22
+        if trade_class == "skip" or (tier == "TIER_D" and hard_bad_opportunity):
             logger.info(
                 "Tier skip blocked market_id=%s edge=%.4f priority=%.4f reliability=%.4f opportunity=%.4f ease=%.4f learn=%.4f trade_class=%s tier=%s rescued=%s",
                 candidate.get("market_id"),
-                candidate.get("edge", 0.0),
+                edge,
                 candidate.get("portfolio_priority_score", 0.0),
-                candidate.get("conclusion_reliability_score", 0.0),
-                candidate.get("opportunity_score", 0.0),
-                candidate.get("ease_of_win_score", 0.0),
-                candidate.get("learning_velocity_score", 0.0),
+                reliability,
+                opportunity,
+                ease,
+                learn,
                 trade_class,
                 tier,
                 rescued_from_tier_skip,
