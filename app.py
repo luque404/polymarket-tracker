@@ -486,12 +486,98 @@ def heartbeat_runner(force_claim=False):
     })
 
 
+def clear_cycle_lock(reason="manual_clear"):
+    if not DATABASE_URL:
+        return False
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE state SET value='' WHERE key IN ('runner_cycle_lock_owner','runner_cycle_lock_until')")
+        logger.warning("Cycle lock cleared reason=%s", reason)
+        return True
+    except psycopg2.Error:
+        logger.exception("Failed to clear cycle lock reason=%s", reason)
+        return False
+
+
+def recover_stale_cycle_lock(now=None):
+    if not DATABASE_URL:
+        return False, "db_unavailable"
+    now = now or utc_now()
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT key, value
+                    FROM state
+                    WHERE key IN (
+                        'runner_cycle_lock_owner',
+                        'runner_cycle_lock_until',
+                        'runner_leader_id',
+                        'runner_last_heartbeat',
+                        'last_cycle_started_at',
+                        'last_cycle_status'
+                    )
+                    FOR UPDATE
+                    """
+                )
+                rows = {key: value for key, value in cur.fetchall()}
+                owner = rows.get("runner_cycle_lock_owner", "")
+                lock_until = iso_to_datetime(rows.get("runner_cycle_lock_until", ""))
+                leader_id = rows.get("runner_leader_id", "")
+                leader_heartbeat = iso_to_datetime(rows.get("runner_last_heartbeat", ""))
+                last_cycle_started = iso_to_datetime(rows.get("last_cycle_started_at", ""))
+                last_cycle_status = rows.get("last_cycle_status", "")
+                if not owner:
+                    return False, "no_lock"
+
+                lock_expired = not lock_until or lock_until <= now
+                leader_stale = bool(leader_id) and bool(leader_heartbeat) and (now - leader_heartbeat).total_seconds() > RUNNER_CYCLE_LOCK_TIMEOUT_SECONDS
+                leader_missing = bool(owner) and bool(leader_id) and owner != leader_id
+                cycle_overdue = bool(last_cycle_started) and (now - last_cycle_started).total_seconds() > RUNNER_CYCLE_LOCK_TIMEOUT_SECONDS
+                cycle_not_running = last_cycle_status not in ("running", "")
+
+                stale_reason = None
+                if lock_expired:
+                    stale_reason = "expired"
+                elif leader_stale:
+                    stale_reason = "leader_stale"
+                elif leader_missing and cycle_not_running:
+                    stale_reason = "owner_not_leader"
+                elif cycle_overdue:
+                    stale_reason = "cycle_overdue"
+                elif cycle_not_running and owner:
+                    stale_reason = "cycle_not_running"
+
+                if not stale_reason:
+                    return False, "active"
+
+                cur.execute("UPDATE state SET value='' WHERE key='runner_cycle_lock_owner'")
+                cur.execute("UPDATE state SET value='' WHERE key='runner_cycle_lock_until'")
+                logger.warning(
+                    "Recovered stale cycle lock owner=%s reason=%s lock_until=%s leader_id=%s last_cycle_status=%s",
+                    owner,
+                    stale_reason,
+                    rows.get("runner_cycle_lock_until", ""),
+                    leader_id,
+                    last_cycle_status,
+                )
+                return True, stale_reason
+    except psycopg2.Error:
+        logger.exception("Failed to recover stale cycle lock")
+        return False, "lock_recovery_error"
+
+
 def acquire_cycle_lock():
     if not DATABASE_URL:
         return False, "db_unavailable"
     now = utc_now()
     until = now + timedelta(seconds=RUNNER_CYCLE_LOCK_TIMEOUT_SECONDS)
     try:
+        recovered, recovery_reason = recover_stale_cycle_lock(now=now)
+        if recovered:
+            logger.info("Cycle lock recovery before acquire reason=%s", recovery_reason)
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT key, value FROM state WHERE key IN ('runner_cycle_lock_owner','runner_cycle_lock_until') FOR UPDATE")
@@ -499,6 +585,7 @@ def acquire_cycle_lock():
                 owner = rows.get("runner_cycle_lock_owner", "")
                 lock_until = iso_to_datetime(rows.get("runner_cycle_lock_until", ""))
                 if owner and owner != RUNNER_PROCESS_ID and lock_until and lock_until > now:
+                    logger.info("Cycle lock busy owner=%s lock_until=%s", owner, rows.get("runner_cycle_lock_until", ""))
                     return False, owner
                 cur.execute(
                     "INSERT INTO state (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
@@ -508,6 +595,7 @@ def acquire_cycle_lock():
                     "INSERT INTO state (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
                     ("runner_cycle_lock_until", to_iso(until)),
                 )
+        logger.info("Cycle lock acquired owner=%s until=%s", RUNNER_PROCESS_ID, to_iso(until))
         return True, "ok"
     except psycopg2.Error:
         logger.exception("Failed to acquire cycle lock")
@@ -520,11 +608,15 @@ def release_cycle_lock():
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT value FROM state WHERE key='runner_cycle_lock_owner' FOR UPDATE")
-                row = cur.fetchone()
-                if row and row[0] == RUNNER_PROCESS_ID:
+                cur.execute("SELECT key, value FROM state WHERE key IN ('runner_cycle_lock_owner','runner_cycle_lock_until') FOR UPDATE")
+                rows = {key: value for key, value in cur.fetchall()}
+                owner = rows.get("runner_cycle_lock_owner", "")
+                if owner == RUNNER_PROCESS_ID:
                     cur.execute("UPDATE state SET value='' WHERE key='runner_cycle_lock_owner'")
                     cur.execute("UPDATE state SET value='' WHERE key='runner_cycle_lock_until'")
+                    logger.info("Cycle lock released owner=%s", RUNNER_PROCESS_ID)
+                elif owner:
+                    logger.info("Cycle lock release skipped current_owner=%s process=%s", owner, RUNNER_PROCESS_ID)
         return True
     except psycopg2.Error:
         logger.exception("Failed to release cycle lock")
@@ -3263,6 +3355,7 @@ def bet_loop():
                 continue
             if claim_runner_leader():
                 heartbeat_runner()
+                recover_stale_cycle_lock()
                 if cycle_due():
                     with app.app_context():
                         execute_bot_cycle(trigger="auto")
